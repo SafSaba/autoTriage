@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop_dev_only_password
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./sut/backend-spring
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/shop
+      SPRING_DATASOURCE_USERNAME: shop
+      SPRING_DATASOURCE_PASSWORD: shop_dev_only_password
+      APP_JWT_SECRET: local-dev-only-jwt-secret-minimum-32-bytes-long
+      BUG_OFF_BY_ONE_DISCOUNT: "false"
+      BUG_STALE_CART_CACHE: "false"
+      BUG_NULL_SHIPPING_NPE: "false"
+    ports: ["8080:8080"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./sut/frontend-react
+    ports: ["5173:80"]
+    depends_on:
+      - backend
