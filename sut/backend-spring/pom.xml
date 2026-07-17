@@ -62,9 +62,7 @@
             <version>2.8.5</version>
         </dependency>
         <dependency>
-            <!-- JJWT security dependencies to be wired in security milestone -->
-        <!-- <groupId>io.jsonwebtoken</groupId> -->
-        <groupId>io.jsonwebtoken.stub</groupId>
+            <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-api</artifactId>
             <version>${jjwt.version}</version>
         </dependency>
