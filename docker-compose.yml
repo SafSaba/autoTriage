@@ -32,15 +32,3 @@ services:
     ports: ["5173:80"]
     depends_on:
       - backend
-
-  # Temporary local pgAdmin for database inspection during schema design
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: autotriage-pgadmin
-    environment:
-      PGADMIN_DEFAULT_EMAIL: dev@local.test
-      PGADMIN_DEFAULT_PASSWORD: devpassword
-    ports:
-      - "5050:80"
-    depends_on:
-      - postgres
