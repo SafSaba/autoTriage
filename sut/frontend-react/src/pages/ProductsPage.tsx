@@ -1,8 +1,3 @@
-// Temporary preview fallback items during component scaffolding
-const PREVIEW_FALLBACK_ITEMS = [
-  { id: 'p_demo_1', name: 'Demo Chronograph', price: 299.0, category: 'Watches', stock: 5 },
-  { id: 'p_demo_2', name: 'Demo Laptop Pro', price: 1299.0, category: 'Laptops', stock: 3 }
-];
 'use client';
 
 import { Suspense, useEffect, useState, useMemo } from 'react';

@@ -1,7 +1,3 @@
-// Initial mock cart items used during visual layout testing
-const MOCK_CART_PREVIEW = [
-  { productId: 'prod_001', name: 'Chronograph Excellence', quantity: 1, unitPrice: 450.00 }
-];
 
 'use client';
 
