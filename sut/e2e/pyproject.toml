@@ -1,0 +1,30 @@
+[project]
+name = "autotriage-sut-e2e"
+version = "0.1.0"
+description = "Python pytest + Playwright E2E and REST API test suite for the AutoTriage E-Automate SUT"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8.3.0",
+    "pytest-playwright>=0.5.2",
+    "playwright>=1.48.0",
+    "httpx>=0.27.0",
+    "pytest-json-report>=1.5.0",
+    "pytest-html>=4.1.1",
+    "pydantic>=2.9.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --json-report --json-report-file=reports/pytest-report.json --html=reports/pytest-report.html --self-contained-html"
+markers = [
+    "smoke: Fast critical-path verification tests",
+    "ui: Browser E2E tests using Playwright Python",
+    "api: Direct REST API contract tests using httpx",
+    "database: Direct relational database integrity, constraint, and ACID rollback tests",
+    "admin: Admin console and RBAC verification tests",
+    "bug_repro: AutoTriage runtime fault-injection reproduction tests",
+]

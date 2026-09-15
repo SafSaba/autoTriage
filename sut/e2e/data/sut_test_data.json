@@ -1,0 +1,82 @@
+{
+  "metadata": {
+    "sut": "E-Automate (Spring Boot 3.4 + React 18)",
+    "version": "1.0.0",
+    "purpose": "Data-driven pytest-playwright fixtures and Agentic RAG ground-truth catalog/rules reference"
+  },
+  "accounts": {
+    "buyer_primary": {
+      "email": "buyer@autotriage.local",
+      "password": "BuyerPassword123!",
+      "role": "USER",
+      "displayName": "Buyer One"
+    },
+    "buyer_secondary": {
+      "email": "jane.doe@autotriage.local",
+      "password": "BuyerPassword123!",
+      "role": "USER",
+      "displayName": "Jane Doe"
+    },
+    "admin_primary": {
+      "email": "admin@autotriage.local",
+      "password": "AdminPassword123!",
+      "role": "ADMIN",
+      "displayName": "Safwan Admin"
+    }
+  },
+  "products": [
+    {"id": "prod_001", "name": "Chronograph Excellence", "category": "Watches", "price": 450.00, "stock": 15},
+    {"id": "prod_002", "name": "Titanium Smartwatch", "category": "Watches", "price": 799.99, "stock": 25},
+    {"id": "prod_003", "name": "Ultra-Slim Laptop", "category": "Laptops", "price": 1399.00, "stock": 10},
+    {"id": "prod_004", "name": "Gaming Beast Laptop", "category": "Laptops", "price": 2100.50, "stock": 5},
+    {"id": "prod_005", "name": "Galaxy Pro Smartphone", "category": "Smartphones", "price": 1199.99, "stock": 30},
+    {"id": "prod_006", "name": "Pixel Perfect Smartphone", "category": "Smartphones", "price": 899.00, "stock": 22},
+    {"id": "prod_007", "name": "Minimalist Digital Watch", "category": "Watches", "price": 150.00, "stock": 40},
+    {"id": "prod_008", "name": "Creator Pro Laptop", "category": "Laptops", "price": 2500.00, "stock": 8}
+  ],
+  "business_rules": {
+    "tax_rate": 0.10,
+    "shipping_fee": 0.00,
+    "password_policy": {
+      "min_length": 12,
+      "require_uppercase": true,
+      "require_special_char": true
+    },
+    "shipping_address_policy": {
+      "name_min_length": 2,
+      "line1_min_length": 5,
+      "line2_required": false,
+      "city_min_length": 2,
+      "state_min_length": 2,
+      "postal_code_min_length": 5,
+      "country_min_length": 2
+    },
+    "payment_gateway": {
+      "success_card_number": "4242424242424242",
+      "declined_card_number": "4000000000000002",
+      "declined_last4": "0002",
+      "declined_http_status": 402,
+      "declined_error_message": "Payment declined by issuer (card ending in 0002)"
+    }
+  },
+  "runtime_bug_flags": [
+    {
+      "flag": "BUG_OFF_BY_ONE_DISCOUNT",
+      "default": false,
+      "component": "OrderController.java",
+      "symptom": "Applies 0.99x multiplier instead of 1.10x tax multiplier on POST /api/orders"
+    },
+    {
+      "flag": "BUG_STALE_CART_CACHE",
+      "default": false,
+      "component": "CartController.java",
+      "symptom": "Skips database deletion on DELETE /api/cart/items/{id} and DELETE /api/cart"
+    },
+    {
+      "flag": "BUG_NULL_SHIPPING_NPE",
+      "default": false,
+      "component": "OrderController.java",
+      "symptom": "Calls req.shippingAddress().line2().trim() without null check, throwing HTTP 500 when line2 is omitted"
+    }
+  ]
+}
