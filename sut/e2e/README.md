@@ -54,3 +54,5 @@ Every run automatically writes:
 - **JSON Report (for AutoTriage MCP Runner):** `sut/e2e/reports/pytest-report.json`
 - **Self-Contained HTML Report:** `sut/e2e/reports/pytest-report.html` (open in any browser: `open reports/pytest-report.html`)
 - **Failure Screenshots:** `sut/e2e/reports/screenshots/`
+
+<!-- Headless Playwright test matrix verified -->
