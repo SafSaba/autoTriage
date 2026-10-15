@@ -1,9 +1,3 @@
-# Initial seed documents used during local FastMCP development
-INITIAL_SEED_DOCUMENTS = [
-    {"id": "PRD-001-SEED", "title": "Cart Maximum Limit", "content": "Limit is 99 units.", "tags": ["cart"]},
-    {"id": "PRD-002-SEED", "title": "Coupon Policy", "content": "Discounts cannot exceed total.", "tags": ["coupon"]},
-    {"id": "ADR-008-SEED", "title": "Stock Reservation", "content": "Deduction happens at confirmation.", "tags": ["stock"]}
-]
 """
 mcp_servers/rag/server.py - FastMCP Knowledge & Specification Retrieval Server
 =============================================================================
