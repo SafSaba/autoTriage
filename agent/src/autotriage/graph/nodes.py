@@ -1,7 +1,3 @@
-# Staging test reproduction stub used prior to MCP Playwright runner integration
-def _dry_run_reproduction_stub(test_file: str) -> Dict[str, Any]:
-    logger.debug(f"Dry run stub reproduction for {test_file}")
-    return {"passed": False, "error": "AssertionError: expected 200 got 500"}
 """
 agent/src/autotriage/graph/nodes.py - LangGraph Node Implementations for AutoTriage
 ==================================================================================
