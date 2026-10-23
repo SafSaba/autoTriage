@@ -134,24 +134,5 @@
     "system_logs": "AssertionError: 445.50 != 495.00",
     "system": "Jira Cloud / Azure DevOps",
     "triage_notes": "[Triage Note]: Root cause identified in OrderController.java line 148. BUG_OFF_BY_ONE_DISCOUNT disabled."
-  },
-  {
-    "id": "BUG-303",
-    "type": "Bug",
-    "title": "Checkout total calculates 0.99x instead of 1.10x tax multiplier",
-    "description": "When BUG_OFF_BY_ONE_DISCOUNT is active, total is discounted instead of taxed.",
-    "priority": "P1",
-    "severity": "Major",
-    "reproduction_steps": "1. Log in as buyer.\n2. Add prod_001 ($450.00).\n3. Complete checkout.\n4. Observe total is $445.50 instead of $495.00.",
-    "area_path": "E-Automate\\Checkout",
-    "sprint": "Sprint 1",
-    "iteration_path": "Release 1.0\\Sprint 1",
-    "state": "Resolved",
-    "assigned_to": "tech-lead@autotriage.local",
-    "related_prd": "PRD-001",
-    "related_test": "sut/e2e/tests/test_api_and_bugs.py::test_autotriage_three_runtime_bug_flags",
-    "system_logs": "AssertionError: 445.50 != 495.00",
-    "system": "Jira Cloud / Azure DevOps",
-    "triage_notes": "[Triage Note]: Root cause identified in OrderController.java line 148. BUG_OFF_BY_ONE_DISCOUNT disabled."
   }
 ]
