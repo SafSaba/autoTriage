@@ -37,6 +37,18 @@ from mcp_servers.workitems.server import (
     update_work_item_status,
     list_sprints_and_epics,
 )
+from mcp_servers.playwright_runner.server import (
+    search_tests,
+    run_test,
+    toggle_sut_bug_flag,
+    get_sut_bug_flags,
+)
+from mcp_servers.notify.server import (
+    post_slack_alert,
+    post_teams_card,
+    get_notification_history,
+    clear_notification_history,
+)
 
 
 class TestFastMCPRagServer:
@@ -203,3 +215,83 @@ class TestFastMCPWorkItemsServer:
         assert "Sprint 2" in summary["sprints"]
         assert any(e["id"] == "EPIC-100" for e in summary["epics"])
         assert any(e["id"] == "EPIC-200" for e in summary["epics"])
+
+
+class TestFastMCPPlaywrightRunnerServer:
+    """Tests the FastMCP Playwright Runner and Pytest execution tools."""
+
+    def test_search_tests_discovery(self):
+        """Validates AST discovery of pytest scenarios by feature keyword."""
+        # Search for tax / discount tests
+        tax_tests = search_tests(query="tax")
+        assert len(tax_tests) >= 1
+        assert any("tax" in t["test_id"].lower() for t in tax_tests)
+
+        # Search for cart tests
+        cart_tests = search_tests(query="cart", test_type="ui")
+        assert len(cart_tests) >= 1
+        assert any("cart" in t["file"] for t in cart_tests)
+
+    def test_toggle_and_inspect_bug_flags(self):
+        """Validates toggling SUT fault-injection bug flags via the MCP server."""
+        # 1. Toggle ON
+        res_on = toggle_sut_bug_flag("BUG_OFF_BY_ONE_DISCOUNT", True)
+        assert res_on["success"] is True
+
+        # 2. Inspect
+        flags = get_sut_bug_flags()
+        assert flags["flags"]["BUG_OFF_BY_ONE_DISCOUNT"] is True
+
+        # 3. Toggle OFF
+        res_off = toggle_sut_bug_flag("BUG_OFF_BY_ONE_DISCOUNT", False)
+        assert res_off["success"] is True
+        assert get_sut_bug_flags()["flags"]["BUG_OFF_BY_ONE_DISCOUNT"] is False
+
+    def test_run_test_execution_pass(self):
+        """Validates targeted execution of a clean passing test."""
+        res = run_test("tests/test_backend_api.py::test_openapi_swagger_contract", timeout_sec=20)
+        assert res["status"] == "PASSED"
+        assert res["exit_code"] == 0
+        assert res["duration_sec"] > 0
+
+
+class TestFastMCPNotifyServer:
+    """Tests the FastMCP Slack & Teams notification tools."""
+
+    def test_post_slack_alert_and_audit_history(self):
+        """Validates Slack Block Kit alert formatting and local audit logging."""
+        clear_notification_history()
+
+        res = post_slack_alert(
+            channel="#eng-triage",
+            title="P1 Defect Confirmed: Tax Discount Bug",
+            priority="P1",
+            message="Order total calculated with 0.99x instead of 1.10x multiplier.",
+            fields={"Ticket": "BUG-301", "PRD": "PRD-001", "Owner": "alex.mercer"},
+        )
+        assert res["success"] is True
+        assert res["channel"] == "#eng-triage"
+
+        # Check audit log
+        history = get_notification_history(limit=5)
+        assert len(history) == 1
+        assert history[0]["platform"] == "slack"
+        assert history[0]["priority"] == "P1"
+        assert history[0]["fields"]["Ticket"] == "BUG-301"
+
+    def test_post_teams_adaptive_card(self):
+        """Validates Teams Adaptive Card payload generation and history tracking."""
+        res = post_teams_card(
+            title="AutoTriage Resolution: Working As Designed",
+            subtitle="Checkout / Mock Payment Gateway",
+            summary="Card ending in 0002 decline is documented in PRD-004.",
+            facts={"Status": "Closed WAD", "Confidence": "99%"},
+            actions=[{"title": "Open Backlog", "url": "https://jira.autotriage.local"}],
+        )
+        assert res["success"] is True
+        assert res["platform"] == "teams"
+
+        history = get_notification_history(limit=5)
+        assert len(history) >= 2
+        assert any(h["platform"] == "teams" for h in history)
+

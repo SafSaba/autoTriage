@@ -30,6 +30,7 @@ apphosting.yaml
 sut/e2e/reports/
 *.log
 sut/backend-spring/backend.log
+data/
 
 # IDE & OS
 .DS_Store
