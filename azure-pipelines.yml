@@ -45,6 +45,7 @@ stages:
 
           - script: |
               export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+              export PYTHONPATH="$(Build.SourcesDirectory):$PYTHONPATH"
               echo "==> Running Playwright & Pytest Smoke Suite..."
               cd sut/e2e
               uv run pytest -m smoke --junitxml=reports/junit-report.xml --html=reports/pytest-report.html --self-contained-html
