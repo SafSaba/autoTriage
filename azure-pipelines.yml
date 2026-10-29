@@ -44,6 +44,7 @@ stages:
             displayName: "Verify PostgreSQL Container Health"
 
           - script: |
+              export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
               echo "==> Running Playwright & Pytest Smoke Suite..."
               cd sut/e2e
               uv run pytest -m smoke --junitxml=reports/junit-report.xml --html=reports/pytest-report.html --self-contained-html
