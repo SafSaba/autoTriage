@@ -1,0 +1,66 @@
+# ==============================================================================
+# AutoTriage Enterprise Azure DevOps CI/CD Pipeline
+# ==============================================================================
+# - Scheduled Smoke & Health Suite (Every 6 Hours)
+# - PR Validation & Quality Gates (main branch)
+# - Automated HTML Test Reports & Artifact Publishing
+# ==============================================================================
+
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+schedules:
+  - cron: "0 */6 * * *"
+    displayName: "6-Hour Automated AutoTriage Smoke & Health Verification"
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  name: 'Default'
+
+stages:
+  - stage: SmokeAndHealthCheck
+    displayName: "SUT Smoke & Health Verification"
+    jobs:
+      - job: ExecuteSmokeSuite
+        displayName: "Run Playwright Smoke Suite & Publish Artifacts"
+        timeoutInMinutes: 20
+        steps:
+          - script: |
+              echo "==> Ensuring SUT infrastructure and dependencies..."
+              docker compose up -d db
+              sleep 3
+            displayName: "Verify PostgreSQL Container Health"
+
+          - script: |
+              echo "==> Running Playwright & Pytest Smoke Suite..."
+              cd sut/e2e
+              uv run pytest -m smoke --junitxml=reports/junit-report.xml --html=reports/pytest-report.html --self-contained-html
+            displayName: "Execute Pytest Smoke Suite"
+
+          - task: PublishTestResults@2
+            displayName: "Publish Native Azure DevOps Test Results"
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: 'sut/e2e/reports/junit-report.xml'
+              testRunTitle: 'AutoTriage Smoke Test Run'
+            condition: always()
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish HTML Test Report Artifact"
+            inputs:
+              targetPath: 'sut/e2e/reports/pytest-report.html'
+              artifact: 'AutoTriage-Smoke-HTML-Report'
+              publishLocation: 'pipeline'
+            condition: always()

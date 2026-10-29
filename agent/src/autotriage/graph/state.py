@@ -43,6 +43,8 @@ class TriageState(TypedDict, total=False):
 
     # Work Item & Notification Outcomes
     created_work_item_id: Optional[str]
+    jira_url: Optional[str]
+    ado_url: Optional[str]
     slack_alert_sent: bool
     teams_card_sent: bool
     triage_notes: str

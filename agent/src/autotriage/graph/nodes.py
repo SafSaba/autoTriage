@@ -204,9 +204,20 @@ def work_item_node(state: TriageState) -> Dict[str, Any]:
     )
 
     created_id = ticket_res.get("ticket", {}).get("id")
+    jira_url = ticket_res.get("ticket", {}).get("jira_url")
+    ado_url = ticket_res.get("ticket", {}).get("ado_url")
+
+    triage_note = f"{state.get('triage_notes', '')}\nWork item {created_id} created."
+    if jira_url:
+        triage_note += f" [Jira: {jira_url}]"
+    if ado_url:
+        triage_note += f" [Azure DevOps: {ado_url}]"
+
     return {
         "created_work_item_id": created_id,
-        "triage_notes": f"{state.get('triage_notes', '')}\nWork item {created_id} created.",
+        "jira_url": jira_url,
+        "ado_url": ado_url,
+        "triage_notes": triage_note,
     }
 
 
@@ -232,6 +243,10 @@ def notify_node(state: TriageState) -> Dict[str, Any]:
     }
     if state.get("created_work_item_id"):
         fields["Backlog Item"] = state.get("created_work_item_id")
+    if state.get("jira_url"):
+        fields["Jira Cloud"] = state.get("jira_url")
+    if state.get("ado_url"):
+        fields["Azure DevOps"] = state.get("ado_url")
     if state.get("assigned_owner"):
         fields["Assigned Owner"] = f"{state.get('assigned_owner')} ({state.get('owner_status')})"
     if state.get("rag_citations"):

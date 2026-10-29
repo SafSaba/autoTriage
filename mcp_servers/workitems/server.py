@@ -10,8 +10,11 @@ Enables the AutoTriage agent to:
 5. Seamlessly sync with real Jira Cloud / Azure DevOps when API tokens are configured
 """
 
+import base64
 import json
 import os
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,8 +26,153 @@ app = MCPServer("autotriage-workitems")
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 BACKLOG_FILE = BASE_DIR / "knowledge" / "workitems" / "jira_ado_backlog.json"
+ENV_FILE = BASE_DIR / ".env"
 
 WORK_ITEMS: List[Dict[str, Any]] = []
+
+
+def _load_env() -> Dict[str, str]:
+    """Loads environment variables from root .env if not already in os.environ."""
+    env = dict(os.environ)
+    if ENV_FILE.exists():
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env.setdefault(k.strip(), v.strip())
+    return env
+
+
+def _create_jira_issue_live(
+    title: str,
+    description: str,
+    repro_steps: str,
+    priority: str,
+    env: Dict[str, str],
+) -> Optional[Dict[str, Any]]:
+    """Creates a real issue in Atlassian Jira Cloud via REST API v3."""
+    base_url = env.get("JIRA_BASE_URL", "").rstrip("/")
+    email = env.get("JIRA_USER_EMAIL", "")
+    token = env.get("JIRA_API_TOKEN", "")
+    project_key = env.get("JIRA_PROJECT_KEY", "SCRUM")
+
+    if not (base_url and email and token):
+        return None
+
+    try:
+        auth = base64.b64encode(f"{email}:{token}".encode()).decode()
+        url = f"{base_url}/rest/api/3/issue"
+
+        payload = {
+            "fields": {
+                "project": {"key": project_key},
+                "summary": title[:255],
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": description}],
+                        },
+                        {
+                            "type": "heading",
+                            "attrs": {"level": 3},
+                            "content": [{"type": "text", "text": "Reproduction Steps"}],
+                        },
+                        {
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": repro_steps}],
+                        },
+                    ],
+                },
+                "issuetype": {"name": "Task"},
+            }
+        }
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Basic {auth}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            key = data.get("key")
+            return {
+                "key": key,
+                "url": f"{base_url}/browse/{key}",
+            }
+    except Exception as e:
+        # Graceful fallback: log and return None without blocking local triage
+        print(f"[WorkItems MCP] Live Jira creation notice: {e}")
+        return None
+
+
+def _create_ado_work_item_live(
+    title: str,
+    description: str,
+    repro_steps: str,
+    priority: str,
+    env: Dict[str, str],
+) -> Optional[Dict[str, Any]]:
+    """Creates a real Bug in Microsoft Azure DevOps via REST API v7."""
+    org = env.get("AZURE_DEVOPS_ORG", "")
+    project = env.get("AZURE_DEVOPS_PROJECT", "AutoTriage")
+    pat = env.get("AZURE_DEVOPS_PAT", "")
+
+    if not (org and project and pat):
+        return None
+
+    try:
+        auth = base64.b64encode(f":{pat}".encode()).decode()
+        url = f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems/%24Bug?api-version=7.0"
+
+        patch = [
+            {"op": "add", "path": "/fields/System.Title", "value": title[:255]},
+            {
+                "op": "add",
+                "path": "/fields/Microsoft.VSTS.TCM.ReproSteps",
+                "value": f"{description}<br><br><b>Reproduction Steps:</b><br>{repro_steps.replace(chr(10), '<br>')}",
+            },
+            {
+                "op": "add",
+                "path": "/fields/Microsoft.VSTS.Common.Priority",
+                "value": 1 if priority.upper() in ["P0", "P1"] else 2,
+            },
+            {
+                "op": "add",
+                "path": "/fields/Microsoft.VSTS.Common.Severity",
+                "value": "1 - Critical" if priority.upper() in ["P0", "P1"] else "2 - High",
+            },
+        ]
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(patch).encode("utf-8"),
+            headers={
+                "Authorization": f"Basic {auth}",
+                "Content-Type": "application/json-patch+json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            item_id = data.get("id")
+            html_url = data.get("_links", {}).get("html", {}).get("href")
+            return {
+                "id": str(item_id),
+                "url": html_url or f"https://dev.azure.com/{org}/{project}/_workitems/edit/{item_id}",
+            }
+    except Exception as e:
+        print(f"[WorkItems MCP] Live Azure DevOps creation notice: {e}")
+        return None
 
 
 def load_work_items() -> None:
@@ -156,6 +304,18 @@ def create_bug_ticket(
         "system_logs": logs,
         "system": "Jira Cloud / Azure DevOps",
     }
+
+    # Dispatch to live Jira Cloud & Azure DevOps if configured
+    env = _load_env()
+    jira_info = _create_jira_issue_live(title.strip(), description.strip(), repro_steps.strip(), priority, env)
+    if jira_info:
+        new_bug["jira_key"] = jira_info["key"]
+        new_bug["jira_url"] = jira_info["url"]
+
+    ado_info = _create_ado_work_item_live(title.strip(), description.strip(), repro_steps.strip(), priority, env)
+    if ado_info:
+        new_bug["ado_id"] = ado_info["id"]
+        new_bug["ado_url"] = ado_info["url"]
 
     WORK_ITEMS.append(new_bug)
     save_work_items()
