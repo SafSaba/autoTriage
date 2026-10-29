@@ -12,6 +12,9 @@ dependencies = [
     "pytest-json-report>=1.5.0",
     "pytest-html>=4.1.1",
     "pydantic>=2.9.0",
+    "mcp>=2.3.0",
+    "langchain-core>=1.7.1",
+    "langgraph>=1.2.18",
 ]
 
 [tool.pytest.ini_options]
