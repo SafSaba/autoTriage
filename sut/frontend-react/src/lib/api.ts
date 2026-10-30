@@ -16,10 +16,27 @@ export function setAuthToken(token: string | null): void {
 }
 
 const metaEnv = (import.meta as any).env || {};
-export const API_BASE = metaEnv.VITE_API_URL !== undefined 
-  ? metaEnv.VITE_API_URL 
-  : (metaEnv.DEV ? '' : 'https://autotriage-backend.graytree-645df5bf.eastus.azurecontainerapps.io');
 
+export function resolveApiBase(): string {
+  if (metaEnv.VITE_API_URL !== undefined && metaEnv.VITE_API_URL !== '') {
+    return metaEnv.VITE_API_URL;
+  }
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    if (host.includes('white-pebble')) {
+      return 'https://autotriage-backend-dev.graytree-645df5bf.eastus.azurecontainerapps.io';
+    }
+    if (host.includes('jolly-sky')) {
+      return 'https://autotriage-backend-qa.graytree-645df5bf.eastus.azurecontainerapps.io';
+    }
+    if (host.includes('happy-coast')) {
+      return 'https://autotriage-backend-prod.graytree-645df5bf.eastus.azurecontainerapps.io';
+    }
+  }
+  return metaEnv.DEV ? '' : 'https://autotriage-backend-dev.graytree-645df5bf.eastus.azurecontainerapps.io';
+}
+
+export const API_BASE = resolveApiBase();
 
 export async function apiFetch<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getAuthToken();
@@ -30,7 +47,8 @@ export async function apiFetch<T = any>(path: string, init: RequestInit = {}): P
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
+  const base = resolveApiBase();
+  const url = path.startsWith('http') ? path : `${base}${path}`;
   const res = await fetch(url, { ...init, headers });
   const text = await res.text();
   let data: any = null;

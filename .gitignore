@@ -39,3 +39,4 @@ data/
 .vscode/
 *.swp
 sut/backend-spring/data/
+*.zip
