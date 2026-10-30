@@ -5,6 +5,7 @@ import { CartProvider } from '@/components/CartProvider';
 import { Header } from '@/components/header';
 import { Footer } from '@/components/footer';
 import { Toaster } from '@/components/ui/toaster';
+import { FDEMissionControl } from '@/components/FDEMissionControl';
 
 import ProductsPage from '@/pages/ProductsPage';
 import ProductDetailPage from '@/pages/ProductDetailPage';
@@ -56,6 +57,7 @@ export default function App() {
               </main>
               <Footer />
               <Toaster />
+              <FDEMissionControl />
             </div>
           </CartProvider>
         </AuthProvider>

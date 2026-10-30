@@ -40,3 +40,6 @@ data/
 *.swp
 sut/backend-spring/data/
 *.zip
+reports/
+*.pdf
+

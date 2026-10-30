@@ -48,3 +48,13 @@ class TriageState(TypedDict, total=False):
     slack_alert_sent: bool
     teams_card_sent: bool
     triage_notes: str
+
+    # Frontier FDE & Self-Healing Telemetry (Sprint 6)
+    operation_id: Optional[str]
+    suspect_file: Optional[str]
+    suspect_line: Optional[int]
+    pr_url: Optional[str]
+    pr_id: Optional[int]
+    self_heal_verified: bool
+    adversarial_critic_badge: Optional[str]
+    finops_receipt: Optional[Dict[str, Any]]

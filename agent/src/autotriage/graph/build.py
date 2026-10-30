@@ -21,6 +21,7 @@ from agent.src.autotriage.graph.nodes import (
     reproduction_node,
     sanitize_node,
     security_guard_node,
+    self_heal_pr_node,
     work_item_node,
 )
 from agent.src.autotriage.graph.state import TriageState
@@ -58,6 +59,7 @@ def build_triage_graph() -> Any:
     workflow.add_node("reproduction", reproduction_node)
     workflow.add_node("ownership", ownership_node)
     workflow.add_node("work_item", work_item_node)
+    workflow.add_node("self_heal_pr", self_heal_pr_node)
     workflow.add_node("notify", notify_node)
 
     # 2. Add Transitions & Edges
@@ -96,7 +98,8 @@ def build_triage_graph() -> Any:
 
     # Sequential edges for confirmed bugs
     workflow.add_edge("ownership", "work_item")
-    workflow.add_edge("work_item", "notify")
+    workflow.add_edge("work_item", "self_heal_pr")
+    workflow.add_edge("self_heal_pr", "notify")
     workflow.add_edge("notify", END)
 
     return workflow.compile()

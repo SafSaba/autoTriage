@@ -38,10 +38,49 @@ export function resolveApiBase(): string {
 
 export const API_BASE = resolveApiBase();
 
+export let lastTraceparent: string = 'None';
+export let lastOperationId: string = 'None';
+
+function generateW3CTraceparent(): { traceparent: string; traceId: string } {
+  try {
+    const traceId = Array.from(window.crypto.getRandomValues(new Uint8Array(16)))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const spanId = Array.from(window.crypto.getRandomValues(new Uint8Array(8)))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const traceparent = `00-${traceId}-${spanId}-01`;
+    lastTraceparent = traceparent;
+    lastOperationId = traceId;
+    return { traceparent, traceId };
+  } catch {
+    const fallbackId = Math.random().toString(16).substring(2, 18).padEnd(32, '0');
+    lastTraceparent = `00-${fallbackId}-1122334455667788-01`;
+    lastOperationId = fallbackId;
+    return { traceparent: lastTraceparent, traceId: fallbackId };
+  }
+}
+
+export function getTelemetryState() {
+  return {
+    traceparent: lastTraceparent,
+    operationId: lastOperationId,
+    apiBase: resolveApiBase(),
+    env: typeof window !== 'undefined' && window.location.hostname.includes('happy-coast')
+      ? 'PROD'
+      : typeof window !== 'undefined' && window.location.hostname.includes('jolly-sky')
+      ? 'QA'
+      : 'DEV',
+  };
+}
+
 export async function apiFetch<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getAuthToken();
+  const { traceparent } = generateW3CTraceparent();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'traceparent': traceparent,
+    'x-ms-request-root-id': lastOperationId,
     ...((init.headers as Record<string, string>) || {}),
   };
   if (token) {
