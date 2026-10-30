@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import type { Product, CartItem, Order, ShippingAddress, UserProfile } from './types';
 
 const TOKEN_KEY = 'e_automate_jwt';
@@ -14,6 +15,12 @@ export function setAuthToken(token: string | null): void {
   }
 }
 
+const metaEnv = (import.meta as any).env || {};
+export const API_BASE = metaEnv.VITE_API_URL !== undefined 
+  ? metaEnv.VITE_API_URL 
+  : (metaEnv.DEV ? '' : 'https://autotriage-backend.graytree-645df5bf.eastus.azurecontainerapps.io');
+
+
 export async function apiFetch<T = any>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getAuthToken();
   const headers: Record<string, string> = {
@@ -23,7 +30,8 @@ export async function apiFetch<T = any>(path: string, init: RequestInit = {}): P
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch(path, { ...init, headers });
+  const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
+  const res = await fetch(url, { ...init, headers });
   const text = await res.text();
   let data: any = null;
   if (text) {

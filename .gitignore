@@ -29,6 +29,7 @@ apphosting.yaml
 # Reports and test artifacts
 sut/e2e/reports/
 *.log
+*.jar
 sut/backend-spring/backend.log
 data/
 

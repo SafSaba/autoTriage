@@ -1,12 +1,8 @@
-FROM maven:3-eclipse-temurin-21 AS build
+FROM autotriage-backend:latest
 WORKDIR /app
-COPY pom.xml .
-RUN mvn -q -B dependency:go-offline
-COPY src ./src
-RUN mvn -q -B package -DskipTests
-
-FROM eclipse-temurin:21-jre
-WORKDIR /app
-COPY --from=build /app/target/*.jar app.jar
+COPY agent.jar /app/agent.jar
+COPY target/shop-0.1.0-SNAPSHOT.jar /app/app.jar
 EXPOSE 8080
-ENTRYPOINT ["java","-jar","app.jar"]
+ENTRYPOINT ["java", "-javaagent:/app/agent.jar", "-jar", "app.jar"]
+
+
