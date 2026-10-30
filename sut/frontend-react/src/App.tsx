@@ -52,7 +52,7 @@ export default function App() {
                   <Route path="/profile" element={<ProfilePage />} />
                   <Route path="/admin" element={<AdminPage />} />
                   <Route path="/admin/login" element={<AdminLoginPage />} />
-                  {/* MissionControl route will be wired in agentic command milestone */}
+                  <Route path="/mission-control" element={<MissionControlPage />} />
                   <Route path="/contact" element={<ContactPage />} />
                   <Route path="*" element={<NotFoundPage />} />
                 </Routes>
