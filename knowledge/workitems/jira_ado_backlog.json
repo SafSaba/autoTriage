@@ -486,5 +486,20 @@
     "jira_url": "https://isafwan.atlassian.net/browse/SCRUM-27",
     "ado_id": "71",
     "ado_url": "https://dev.azure.com/isafwan/762a5b91-6f05-482a-8fc4-5cf0ce7f70ef/_workitems/edit/71"
+  },
+  {
+    "id": "US-701",
+    "type": "User Story",
+    "title": "[Safwan-devops] US-701: Enterprise Git Branching Strategy, Branch Protection Policies & Multi-Branch PR Merge Tree Topology",
+    "description": "Transform the linear Git repository history into an enterprise Tier-1 branching topology (subway-map commit graph) using branch protection policies, persona-owned feature branches, and non-fast-forward PR merges.",
+    "acceptance_criteria": "1. Branch policies on main reject direct pushes and require pull request review.\n2. Pull requests require at least 1 linked Work Item (AB#<id>) and code review approval.\n3. Feature branches created and merged via non-fast-forward merge commits (--no-ff) producing a multi-lane branch graph in Azure Repos.\n4. Branching runbook and PR templates documented in repository guidelines.",
+    "state": "New",
+    "sprint": "Backlog",
+    "assigned_to": "Safwan-devops",
+    "area_path": "AutoTriage\\DevOps",
+    "iteration_path": "AutoTriage",
+    "ado_id": "72",
+    "ado_url": "https://dev.azure.com/isafwan/AutoTriage/_workitems/edit/72",
+    "tags": "Sprint7; Backlog; GitBranching; Governance; DevOps; FDE"
   }
 ]
