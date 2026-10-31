@@ -192,5 +192,3 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     </CartContext.Provider>
   );
 }
-
-// CartProvider state persistence initialized
