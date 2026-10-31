@@ -21,13 +21,17 @@ Use this skill whenever processing any engineering, testing, cloud infrastructur
    - LangGraph / FastMCP / Observability / Evals $\rightarrow$ `Safwan-mlops`
    - Production Releases / Customer Demos / Sign-off $\rightarrow$ `Safwan-fde`
 
-3. **Link Work Items to Git:**
+3. **Enforce Gherkin BDD Standard for Features, PBIs & Test Cases:**
+   - All Features and PBIs MUST include step-by-step Gherkin BDD (`Given`, `When`, `Then`, `And`).
+   - All Test Cases MUST contain step-by-step Gherkin BDD reproduction steps (`Given`, `When`, `Then`, `And`) detailing exact payloads, curl commands, and observable proofs.
+
+4. **Link Work Items to Git:**
    Always include `AB#<ID>` in git commits:
    ```bash
    git commit -m "feat(scope): description AB#<work-item-id>"
    ```
 
-4. **Update Story State:**
+5. **Update Story State:**
    ```bash
    az boards work-item update --org https://dev.azure.com/isafwan --id <id> --state "Resolved"
    ```

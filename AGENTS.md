@@ -31,11 +31,18 @@ Whenever an instruction, bug report, or feature request is received:
    - Check if an existing User Story or Bug covers the task.
    - If not, create a new Story or Bug under the active Sprint and parent Feature.
    - Title MUST prefix the Persona name: `[Safwan-<role>] US-XXX: <Title>`.
-3. **Set State to Active:** Move the work item state from `New` $\rightarrow$ `Active`.
-4. **Execute & Commit with `AB#<ID>`:**
+3. **Mandatory Gherkin BDD Formatting (Given / When / Then):**
+   - **ALL Features and PBIs (Product Backlog Items / User Stories)** MUST be specified using step-by-step Gherkin BDD scenarios:
+     * `Given` <system preconditions, user role, authentication, baseline state>
+     * `When` <concrete action, API call, user interaction, payload, or concurrency trigger>
+     * `Then` <expected or vulnerable outcome, response code, state change, and boundary assertions>
+     * `And` <additional telemetry, audit logs, or downstream side effects>
+   - **ALL Test Cases** MUST contain concrete, step-by-step reproduction runbooks in Gherkin BDD format (`Given`, `When`, `Then`, `And`) detailing the exact curl commands, HTTP parameters, concurrency levels, and expected observable evidence so every vulnerability or defect can be demonstrated as a reproducible showcase.
+4. **Set State to Active:** Move the work item state from `New` $\rightarrow$ `Active`.
+5. **Execute & Commit with `AB#<ID>`:**
    - Follow strict testing rules: Python pytest for all E2E tests, Maven for backend, Vite for frontend.
    - Every git commit message MUST include `AB#<WorkItemID>` (e.g. `feat(infra): provision 3 app insights AB#39`).
-5. **Attach Evidence & Resolve:**
+6. **Attach Evidence & Resolve:**
    - Post execution logs, test outputs, or URLs as a discussion comment on the work item.
    - Move state from `Active` $\rightarrow$ `Resolved` or `Closed`.
 
