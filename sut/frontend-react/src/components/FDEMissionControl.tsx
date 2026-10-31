@@ -83,26 +83,35 @@ export const FDEMissionControl: React.FC = () => {
               <span className="text-slate-400">Autonomous Self-Healing:</span>
               <span className="text-emerald-400 font-bold flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                ENABLED (Sprint 6)
+                ENABLED (Sprints 7-8)
               </span>
             </div>
 
-            <div className="pt-2 flex items-center gap-2">
+            <div className="pt-2">
+              <a
+                href="/mission-control"
+                className="block text-center py-1.5 bg-gradient-to-r from-cyan-600 to-violet-600 hover:from-cyan-500 hover:to-violet-500 rounded text-white font-bold text-[11px] shadow-lg shadow-cyan-900/30 transition"
+              >
+                🚀 Launch 4-Zone Command Center UI
+              </a>
+            </div>
+
+            <div className="pt-1 flex items-center gap-2">
               <a
                 href="https://dev.azure.com/isafwan/AutoTriage/_boards/board/t/AutoTriage%20Team/Stories"
                 target="_blank"
                 rel="noreferrer"
                 className="flex-1 text-center py-1 bg-blue-600 hover:bg-blue-500 rounded text-white font-medium text-[10px] transition"
               >
-                ADO Sprint 6 Board
+                ADO Sprint 8 Board
               </a>
               <a
-                href="https://portal.azure.com"
+                href="https://dev.azure.com/isafwan/AutoTriage/_workitems/edit/82"
                 target="_blank"
                 rel="noreferrer"
                 className="flex-1 text-center py-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-200 text-[10px] transition border border-slate-700"
               >
-                Azure App Insights
+                Test Plan TP-700
               </a>
             </div>
           </div>

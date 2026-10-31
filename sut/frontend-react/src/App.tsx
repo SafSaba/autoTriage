@@ -23,6 +23,7 @@ import ProfilePage from '@/pages/ProfilePage';
 import AdminPage from '@/pages/admin/AdminPage';
 import AdminLoginPage from '@/pages/admin/AdminLoginPage';
 import ContactPage from '@/pages/ContactPage';
+import MissionControlPage from '@/pages/MissionControlPage';
 import NotFoundPage from '@/pages/NotFoundPage';
 
 export default function App() {
@@ -51,6 +52,7 @@ export default function App() {
                   <Route path="/profile" element={<ProfilePage />} />
                   <Route path="/admin" element={<AdminPage />} />
                   <Route path="/admin/login" element={<AdminLoginPage />} />
+                  <Route path="/mission-control" element={<MissionControlPage />} />
                   <Route path="/contact" element={<ContactPage />} />
                   <Route path="*" element={<NotFoundPage />} />
                 </Routes>

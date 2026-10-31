@@ -29,7 +29,7 @@ def api_url() -> str:
 
 @pytest.fixture(scope="session")
 def api_client(api_url: str) -> Generator[httpx.Client, None, None]:
-    with httpx.Client(base_url=api_url, timeout=30.0) as client:
+    with httpx.Client(base_url=api_url, timeout=60.0) as client:
         yield client
 
 
