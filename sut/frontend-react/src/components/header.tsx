@@ -75,6 +75,7 @@ export function Header() {
 
   const navLinks: { href: string; label: string }[] = [
     { href: '/products', label: 'E-Automate' },
+    { href: '/mission-control', label: '⚡ FDE Mission Control' },
     { href: '/orders', label: 'Orders' },
     { href: '/contact', label: 'Contact' },
   ];

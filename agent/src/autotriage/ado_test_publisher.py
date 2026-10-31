@@ -19,16 +19,33 @@ PROJECT = "AutoTriage"
 ORG_URL = "https://dev.azure.com/isafwan"
 
 
+def get_ado_pat() -> str:
+    pat = os.getenv("AZURE_DEVOPS_EXT_PAT") or os.getenv("AZURE_DEVOPS_PAT")
+    if not pat:
+        from pathlib import Path
+        for env_path in [Path(".env"), Path("/Users/lion/Projects/autotriage/.env")]:
+            if env_path.exists():
+                for line in env_path.read_text().splitlines():
+                    if line.startswith("AZURE_DEVOPS_PAT="):
+                        pat = line.split("=", 1)[1].strip()
+                        break
+            if pat:
+                break
+    return pat or ""
+
+
 def publish_test_run(
     run_name: str,
     test_results: List[Dict[str, Any]],
-    plan_id: Optional[str] = "82",
+    plan_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Creates an automated Test Run in Azure DevOps, publishes test case results, and marks the run Completed.
     """
+    pat = get_ado_pat()
+
     # 1. Create InProgress Run
-    create_payload = {
+    create_payload: Dict[str, Any] = {
         "name": run_name,
         "isAutomated": True,
         "state": "InProgress",
@@ -37,7 +54,7 @@ def publish_test_run(
         create_payload["plan"] = {"id": str(plan_id)}
 
     cmd_create = [
-        "curl", "-s", "-u", f":{ADO_PAT}",
+        "curl", "-s", "-u", f":{pat}",
         "-X", "POST",
         "-H", "Content-Type: application/json",
         f"{ORG_URL}/{PROJECT}/_apis/test/runs?api-version=7.1",
@@ -52,20 +69,23 @@ def publish_test_run(
     # 2. Add Results
     formatted_results = []
     for r in test_results:
-        formatted_results.append({
+        result_item = {
             "testCaseTitle": r.get("title", "Automated Test"),
             "automatedTestName": r.get("test_name", "test_execution"),
             "automatedTestType": r.get("test_type", "Pytest"),
-            "automatedTestStorage": r.get("storage", "sut/e2e"),
-            "testCase": {"id": str(r.get("test_case_id", "81"))},
+            "automatedTestStorage": r.get("storage", "test_mission_control.py"),
+            "testCase": {"name": r.get("title", "Automated Test")},
             "outcome": r.get("outcome", "Passed"),
             "state": "Completed",
             "durationInMs": r.get("duration_ms", 1200),
-            "errorMessage": r.get("error_message"),
-        })
+            "comment": r.get("comment", "Automated verification execution against Master Test Plan TP-700."),
+        }
+        if r.get("error_message"):
+            result_item["errorMessage"] = r.get("error_message")
+        formatted_results.append(result_item)
 
     cmd_results = [
-        "curl", "-s", "-u", f":{ADO_PAT}",
+        "curl", "-s", "-u", f":{pat}",
         "-X", "POST",
         "-H", "Content-Type: application/json",
         f"{ORG_URL}/{PROJECT}/_apis/test/runs/{run_id}/results?api-version=7.1",
@@ -75,7 +95,7 @@ def publish_test_run(
 
     # 3. Mark Run Completed
     cmd_complete = [
-        "curl", "-s", "-u", f":{ADO_PAT}",
+        "curl", "-s", "-u", f":{pat}",
         "-X", "PATCH",
         "-H", "Content-Type: application/json",
         f"{ORG_URL}/{PROJECT}/_apis/test/runs/{run_id}?api-version=7.1",
