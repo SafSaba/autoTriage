@@ -841,7 +841,7 @@ public class FdeAgenticController {
 
     private String resolveAttackType(String attackType, String prompt) {
         String at = attackType != null ? attackType.toUpperCase(Locale.ROOT).trim() : "";
-        if (at.contains("PRICE")) return "PRICE_INJECTION";
+        if (at.contains("PRICE") || at.contains("TAMPER")) return "PRICE_INJECTION";
         if (at.contains("CART") || at.contains("UNDERFLOW")) return "CART_UNDERFLOW";
         if (at.contains("RACE") || at.contains("CONCURRENCY") || at.contains("OVERSELL")) return "CONCURRENCY_OVERSELL";
         if (at.contains("NPE") || at.contains("SHIPPING") || at.contains("NULL")) return "NULL_SHIPPING_NPE";

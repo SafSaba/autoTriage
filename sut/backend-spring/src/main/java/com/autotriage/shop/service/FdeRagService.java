@@ -410,7 +410,7 @@ public class FdeRagService {
                 }
             }
         } catch (Exception ignored) {}
-        String fallback = "HEAD";
+        String fallback = "4267cd54e9bc94dd4d2ceb24f48a3da8e052dd02";
         cachedGitSha.set(fallback);
         return fallback;
     }

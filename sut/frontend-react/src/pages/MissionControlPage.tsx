@@ -735,7 +735,7 @@ export default function MissionControlPage() {
                     <span>Auth: {session.email || 'fde-sandbox-operator'} ({session.role})</span>
                     <a
                       href="/login"
-                      className="ml-1 px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[10px] font-sans transition"
+                      className="ml-1 px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[10px] font-sans border border-slate-700 transition"
                       title="Log in with specific enterprise credentials (admin@autotriage.local, buyer@autotriage.local)"
                     >
                       Switch Persona ↗
