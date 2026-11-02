@@ -88,7 +88,7 @@ flowchart TD
 Every LangGraph run is traced with **OpenTelemetry + Langfuse** and gated in CI by **`evals/datasets/triage_tickets_golden.jsonl`**:
 
 - **Technical Eval Metrics (CI Gate):**
-  - **Path Routing Accuracy (Preliminary Target):** Must match `expected_path` (`P0`, `P1`, `P2`, `P7`) on `triage_tickets_golden.jsonl` ($\ge 90\%$).
+  - **Path Routing Accuracy:** Must match `expected_path` (`P0`, `P1`, `P2`, `P7`) on `triage_tickets_golden.jsonl` ($\ge 90\%$).
   - **RAG Citation Precision & Faithfulness (RAGAS / DeepEval):** Must cite the exact `expected_rag_citation` (`PRD-001`..`PRD-004`) with zero hallucinated policies.
   - **Bug Reproduction Rate:** Must deterministically fail when the corresponding runtime bug flag is `True` and pass when `False`.
 - **Business Outcome Metrics (Tracked in Langfuse Dashboards):**

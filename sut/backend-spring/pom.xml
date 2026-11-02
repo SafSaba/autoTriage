@@ -65,17 +65,13 @@
             <version>${jjwt.version}</version>
         </dependency>
         <dependency>
-            <!-- JJWT security dependencies to be wired in security milestone -->
-        <!-- <groupId>io.jsonwebtoken</groupId> -->
-        <groupId>io.jsonwebtoken.stub</groupId>
+            <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-impl</artifactId>
             <version>${jjwt.version}</version>
             <scope>runtime</scope>
         </dependency>
         <dependency>
-            <!-- JJWT security dependencies to be wired in security milestone -->
-        <!-- <groupId>io.jsonwebtoken</groupId> -->
-        <groupId>io.jsonwebtoken.stub</groupId>
+            <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-jackson</artifactId>
             <version>${jjwt.version}</version>
             <scope>runtime</scope>

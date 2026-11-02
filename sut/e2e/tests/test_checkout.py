@@ -70,5 +70,3 @@ def test_end_to_end_checkout_order_confirmation_and_stock_decrement(
     page.goto(f"{frontend_url}/orders")
     expect(page.get_by_role("heading", name="My Orders")).to_be_visible()
     expect(page.get_by_text(f"#{order_id[-6:]}")).to_be_visible()
-
-# Checkout retry guards active

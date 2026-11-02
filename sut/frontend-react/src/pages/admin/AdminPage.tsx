@@ -546,5 +546,3 @@ const AdminPage = () => {
 };
 
 export default AdminPage;
-
-// AdminPage defect simulation controls verified

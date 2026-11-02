@@ -160,6 +160,3 @@ To ensure every failure AutoTriage discovers is a controlled `BUG_01..BUG_10` fl
 
 - **What was inside `data/backend`?** Resolved: It contained `types.ts` and `products.ts` (the 8 seed products).
 - **Does checkout use Stripe?** Resolved: `checkout/payment/page.tsx` is already a self-contained mock card form using `react-hook-form` + `zod`. No Stripe SDK needs to be ripped out.
-
-
-<!-- Milestone 1 Verified: Spring Boot 3.4 SUT and PostgreSQL schema fully operational -->
