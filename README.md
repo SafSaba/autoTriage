@@ -6,6 +6,22 @@ Operating directly between continuous integration pipelines, cloud observability
 
 ---
 
+## Executive Live Demo & Environment Endpoints
+
+> [!NOTE]
+> To ensure absolute stability and complete isolation from the main portfolio at `portfolio.safwansaba.info` (hosted on Google Cloud / Firebase), all AutoTriage systems operate on independent, dedicated Microsoft Azure enterprise edge infrastructure with zero shared dependencies.
+
+| Environment | Purpose | Cloud Platform | Live Verified Link |
+| :--- | :--- | :--- | :--- |
+| **Mission Control HUD** | Autonomous Triage Cockpit & Visual Runner | Azure Static Web Apps | [Open Mission Control Cockpit](https://white-pebble-0af89600f.1.azurestaticapps.net/mission-control) |
+| **DEV Storefront** | E-Automate System Under Test (SUT) | Azure Static Web Apps | [Open DEV Storefront](https://white-pebble-0af89600f.1.azurestaticapps.net/) |
+| **DEV Backend API** | Spring Boot 3.4 REST Services | Azure Container Apps | [DEV API Health Check](https://autotriage-backend-dev.graytree-645df5bf.eastus.azurecontainerapps.io/api/health) |
+| **QA Staging** | Automated Canary & Regression Gate | Azure Static Web Apps | [Open QA Staging](https://jolly-sky-018d2b40f.1.azurestaticapps.net/) |
+| **PROD Release** | Release v1.1.0 Baseline Storefront | Azure Static Web Apps | [Open PROD Release](https://happy-coast-030e3060f.1.azurestaticapps.net/) |
+| **Azure DevOps** | Sprint Boards, Epics & Work Item Audit | Azure DevOps Services | [AutoTriage Backlog & Board](https://dev.azure.com/isafwan/AutoTriage) |
+
+---
+
 ## 1. Executive Brief and Problem Statement
 
 ### 1.1 The Enterprise QA and Triage Crisis
