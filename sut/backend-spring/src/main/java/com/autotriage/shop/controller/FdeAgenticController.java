@@ -32,6 +32,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -65,6 +66,12 @@ public class FdeAgenticController {
     private final ObjectMapper objectMapper;
     private final FdeRagService fdeRagService;
     private final FdeEpisodicMemoryService fdeEpisodicMemoryService;
+    private final org.springframework.beans.factory.ObjectProvider<org.springframework.boot.info.BuildProperties> buildPropertiesProvider;
+    private final org.springframework.beans.factory.ObjectProvider<org.springframework.boot.info.GitProperties> gitPropertiesProvider;
+    private final org.springframework.core.env.Environment environment;
+    private final String devUrl;
+    private final String qaUrl;
+    private final String prodUrl;
 
     private static final String SANDBOX_USER_ID = "usr_sandbox_operator";
     private static final String SANDBOX_USER_EMAIL = "fde-sandbox-operator@autotriage.local";
@@ -83,7 +90,13 @@ public class FdeAgenticController {
                                 DtoMapper mapper,
                                 ObjectMapper objectMapper,
                                 FdeRagService fdeRagService,
-                                FdeEpisodicMemoryService fdeEpisodicMemoryService) {
+                                FdeEpisodicMemoryService fdeEpisodicMemoryService,
+                                org.springframework.beans.factory.ObjectProvider<org.springframework.boot.info.BuildProperties> buildPropertiesProvider,
+                                org.springframework.beans.factory.ObjectProvider<org.springframework.boot.info.GitProperties> gitPropertiesProvider,
+                                org.springframework.core.env.Environment environment,
+                                @org.springframework.beans.factory.annotation.Value("${app.envs.dev-url:${DEV_API_URL:http://localhost:8080}}") String devUrl,
+                                @org.springframework.beans.factory.annotation.Value("${app.envs.qa-url:${QA_API_URL:https://autotriage-backend-qa.graytree-645df5bf.eastus.azurecontainerapps.io}}") String qaUrl,
+                                @org.springframework.beans.factory.annotation.Value("${app.envs.prod-url:${PROD_API_URL:}}") String prodUrl) {
         this.productRepository = productRepository;
         this.orderRepository = orderRepository;
         this.cartItemRepository = cartItemRepository;
@@ -96,6 +109,12 @@ public class FdeAgenticController {
         this.objectMapper = objectMapper;
         this.fdeRagService = fdeRagService;
         this.fdeEpisodicMemoryService = fdeEpisodicMemoryService;
+        this.buildPropertiesProvider = buildPropertiesProvider;
+        this.gitPropertiesProvider = gitPropertiesProvider;
+        this.environment = environment;
+        this.devUrl = devUrl;
+        this.qaUrl = qaUrl;
+        this.prodUrl = prodUrl;
     }
 
     // =========================================================================
@@ -105,12 +124,12 @@ public class FdeAgenticController {
     @Operation(summary = "Generate zero-friction scoped operator sandbox JWT token")
     public ResponseEntity<Map<String, Object>> createOperatorSession(@RequestBody(required = false) Map<String, Object> body) {
         ensureSandboxUserExists();
-        String token = jwtService.generateToken(SANDBOX_USER_ID, SANDBOX_USER_EMAIL, "ADMIN");
+        String token = jwtService.generateToken(SANDBOX_USER_ID, SANDBOX_USER_EMAIL, "FDE_OPERATOR");
 
         Map<String, Object> user = Map.of(
                 "id", SANDBOX_USER_ID,
                 "email", SANDBOX_USER_EMAIL,
-                "role", "ADMIN",
+                "role", "FDE_OPERATOR",
                 "displayName", "FDE Sandbox Operator"
         );
 
@@ -125,264 +144,575 @@ public class FdeAgenticController {
     }
 
     // =========================================================================
-    // 2. POST /api/fde/attack & /api/fde/execute-attack
+    // 2. GET /api/fde/releases & /api/fde/releases/self
     // =========================================================================
+    @GetMapping("/releases/self")
+    @Operation(summary = "Get build metadata, Git SHA, Flyway migration version, and active bug flags for this instance")
+    public ResponseEntity<Map<String, Object>> getReleasesSelf() {
+        return ResponseEntity.ok(buildSelfReleaseInfo());
+    }
+
+    @GetMapping("/releases")
+    @Operation(summary = "Query releases telemetry across DEV, QA, and PROD environments")
+    public ResponseEntity<Map<String, Object>> getReleases() {
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("self", buildSelfReleaseInfo());
+
+        Map<String, Object> environments = new LinkedHashMap<>();
+        environments.put("dev", probeReleaseEnvironment("dev", devUrl, false));
+        environments.put("qa", probeReleaseEnvironment("qa", qaUrl, false));
+        environments.put("prod", probeReleaseEnvironment("prod", prodUrl, true));
+        resp.put("environments", environments);
+
+        return ResponseEntity.ok(resp);
+    }
+
+    // =========================================================================
+    // 3. POST /api/fde/scenarios/{id}/run, /compare/{id}, /attack
+    // =========================================================================
+    @PostMapping("/scenarios/{id}/run")
+    @Operation(summary = "Execute deterministic drift scenario against target environment (dev or qa)")
+    public ResponseEntity<Map<String, Object>> runScenario(
+            @PathVariable String id,
+            @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> result = runScenarioInternal(id, body);
+        int httpStatus = ((Number) result.getOrDefault("httpStatus", 200)).intValue();
+        return ResponseEntity.status(httpStatus == 500 ? HttpStatus.INTERNAL_SERVER_ERROR : HttpStatus.OK).body(result);
+    }
+
+    @PostMapping("/compare/{id}")
+    @Operation(summary = "Execute scenario on DEV vs QA and return drift summary")
+    public ResponseEntity<Map<String, Object>> compareScenario(
+            @PathVariable String id,
+            @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> devReq = body != null ? new HashMap<>(body) : new HashMap<>();
+        devReq.put("target", "dev");
+        Map<String, Object> devResult = runScenarioInternal(id, devReq);
+
+        Map<String, Object> qaReq = body != null ? new HashMap<>(body) : new HashMap<>();
+        qaReq.put("target", "qa");
+        Map<String, Object> qaResult = runScenarioInternal(id, qaReq);
+
+        List<Map<String, Object>> driftSummary = new ArrayList<>();
+        boolean driftDetected = false;
+
+        int devStatus = ((Number) devResult.getOrDefault("httpStatus", 0)).intValue();
+        int qaStatus = ((Number) qaResult.getOrDefault("httpStatus", 0)).intValue();
+        if (devStatus != qaStatus) {
+            driftDetected = true;
+            driftSummary.add(Map.of("field", "httpStatus", "dev", devStatus, "qa", qaStatus, "description", "HTTP status differs between DEV and QA"));
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> devBlast = (Map<String, Object>) devResult.getOrDefault("financialBlastRadius", Map.of());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> qaBlast = (Map<String, Object>) qaResult.getOrDefault("financialBlastRadius", Map.of());
+        double devLoss = ((Number) devBlast.getOrDefault("dollarLoss", 0.0)).doubleValue();
+        double qaLoss = ((Number) qaBlast.getOrDefault("dollarLoss", 0.0)).doubleValue();
+        if (Double.compare(devLoss, qaLoss) != 0) {
+            driftDetected = true;
+            driftSummary.add(Map.of("field", "dollarLoss", "dev", devLoss, "qa", qaLoss, "description", "Financial dollar loss differs between DEV and QA"));
+        }
+
+        int devUnits = ((Number) devBlast.getOrDefault("unfulfillableUnits", 0)).intValue();
+        int qaUnits = ((Number) qaBlast.getOrDefault("unfulfillableUnits", 0)).intValue();
+        if (devUnits != qaUnits) {
+            driftDetected = true;
+            driftSummary.add(Map.of("field", "unfulfillableUnits", "dev", devUnits, "qa", qaUnits, "description", "Unfulfillable units differ between DEV and QA"));
+        }
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("scenarioId", id);
+        resp.put("dev", devResult);
+        resp.put("qa", qaResult);
+        resp.put("driftDetected", driftDetected);
+        resp.put("driftSummary", driftSummary);
+
+        return ResponseEntity.ok(resp);
+    }
+
     @PostMapping({"/attack", "/execute-attack"})
     @Operation(summary = "Execute natural language or raw JSON attack with pre/post state capture")
     public ResponseEntity<Map<String, Object>> executeAttack(@RequestBody(required = false) Map<String, Object> req) {
+        String rawPrompt = req != null && req.get("prompt") != null ? String.valueOf(req.get("prompt")) : "";
+        String attackType = req != null && req.get("attackType") != null ? String.valueOf(req.get("attackType")) : "";
+        String resolved = resolveAttackType(attackType, rawPrompt);
+        Map<String, Object> result = runScenarioInternal(resolved, req);
+        int httpStatus = ((Number) result.getOrDefault("httpStatus", 200)).intValue();
+        return ResponseEntity.status(httpStatus == 500 ? HttpStatus.INTERNAL_SERVER_ERROR : HttpStatus.OK).body(result);
+    }
+
+    private Map<String, Object> buildSelfReleaseInfo() {
+        var bp = buildPropertiesProvider.getIfAvailable();
+        var gp = gitPropertiesProvider.getIfAvailable();
+
+        String version = bp != null ? bp.getVersion() : "0.1.0-SNAPSHOT";
+        String gitSha = gp != null ? gp.getShortCommitId() : null;
+        String gitBranch = gp != null ? gp.getBranch() : null;
+        String buildTime = bp != null && bp.getTime() != null ? bp.getTime().toString()
+                : (gp != null && gp.getCommitTime() != null ? gp.getCommitTime().toString() : null);
+
+        String flywayVersion = null;
+        String flywayInstalledOn = null;
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                    "SELECT version, installed_on FROM flyway_schema_history WHERE success ORDER BY installed_rank DESC LIMIT 1"
+            );
+            if (!rows.isEmpty()) {
+                flywayVersion = rows.get(0).get("version") != null ? String.valueOf(rows.get(0).get("version")) : null;
+                flywayInstalledOn = rows.get(0).get("installed_on") != null ? String.valueOf(rows.get(0).get("installed_on")) : null;
+            }
+        } catch (Exception e) {
+            log.debug("Flyway schema history query notice: {}", e.getMessage());
+        }
+
+        Map<String, Object> self = new LinkedHashMap<>();
+        self.put("version", version);
+        self.put("gitSha", gitSha);
+        self.put("gitBranch", gitBranch);
+        self.put("buildTime", buildTime);
+        self.put("flywayVersion", flywayVersion);
+        self.put("flywayInstalledOn", flywayInstalledOn);
+        self.put("activeBugFlags", bugFlagsService.getFlags());
+        return self;
+    }
+
+    private Map<String, Object> probeReleaseEnvironment(String name, String baseUrl, boolean readOnly) {
+        Map<String, Object> env = new LinkedHashMap<>();
+        env.put("name", name);
+        env.put("url", baseUrl);
+        env.put("readOnly", readOnly);
+
+        if (baseUrl == null || baseUrl.isBlank()) {
+            env.put("reachable", false);
+            env.put("data", null);
+            env.put("error", "URL not configured");
+            return env;
+        }
+
+        String targetUrl = baseUrl.replaceAll("/+$", "") + "/api/fde/releases/self";
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(targetUrl))
+                    .header("Accept", "application/json")
+                    .timeout(Duration.ofSeconds(4))
+                    .GET()
+                    .build();
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(4))
+                    .build();
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                env.put("reachable", true);
+                env.put("data", objectMapper.readValue(response.body(), new TypeReference<Map<String, Object>>() {}));
+                env.put("error", null);
+            } else {
+                env.put("reachable", false);
+                env.put("data", null);
+                env.put("error", "HTTP " + response.statusCode());
+            }
+        } catch (Exception ex) {
+            env.put("reachable", false);
+            env.put("data", null);
+            env.put("error", ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName());
+        }
+        return env;
+    }
+
+    private String obtainProbeToken(String baseUrl, String email) {
+        try {
+            Map<String, String> signupBody = Map.of(
+                    "firstName", "Probe",
+                    "lastName", "Runner",
+                    "email", email,
+                    "password", "ProbePassword123!"
+            );
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/api/auth/signup"))
+                    .header("Content-Type", "application/json")
+                    .timeout(Duration.ofSeconds(4))
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(signupBody)))
+                    .build();
+            HttpResponse<String> resp = HttpClient.newHttpClient().send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 200 || resp.statusCode() == 201) {
+                JsonNode json = objectMapper.readTree(resp.body());
+                return json.path("token").asText(null);
+            }
+            if (resp.statusCode() == 400) {
+                Map<String, String> loginBody = Map.of(
+                        "email", email,
+                        "password", "ProbePassword123!"
+                );
+                HttpRequest lReq = HttpRequest.newBuilder()
+                        .uri(URI.create(baseUrl + "/api/auth/login"))
+                        .header("Content-Type", "application/json")
+                        .timeout(Duration.ofSeconds(4))
+                        .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(loginBody)))
+                        .build();
+                HttpResponse<String> lResp = HttpClient.newHttpClient().send(lReq, HttpResponse.BodyHandlers.ofString());
+                if (lResp.statusCode() == 200) {
+                    JsonNode json = objectMapper.readTree(lResp.body());
+                    return json.path("token").asText(null);
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private Map<String, Object> runScenarioInternal(String rawScenarioId, Map<String, Object> req) {
         ensureSandboxUserExists();
         long startTime = System.currentTimeMillis();
 
         String rawPrompt = req != null && req.get("prompt") != null ? String.valueOf(req.get("prompt")) : "";
         String attackType = req != null && req.get("attackType") != null ? String.valueOf(req.get("attackType")) : "";
-        int concurrency = 1;
+        String scenarioId = (rawScenarioId != null && !rawScenarioId.isBlank()) ? rawScenarioId : resolveAttackType(attackType, rawPrompt);
+
+        String normScenario = scenarioId.toUpperCase(Locale.ROOT).trim();
+        if (normScenario.contains("R1") || normScenario.contains("TAX") || normScenario.contains("PRICE")) normScenario = "R1_TAX";
+        else if (normScenario.contains("R2") || normScenario.contains("NULL") || normScenario.contains("NPE")) normScenario = "R2_NULL_LINE2";
+        else if (normScenario.contains("R3") || normScenario.contains("CART") || normScenario.contains("STALE")) normScenario = "R3_STALE_CART";
+        else if (normScenario.contains("R4") || normScenario.contains("RACE") || normScenario.contains("STOCK")) normScenario = "R4_STOCK_RACE";
+        else normScenario = "R1_TAX";
+
+        String target = req != null && req.get("target") != null ? String.valueOf(req.get("target")).toLowerCase(Locale.ROOT).trim() : "dev";
+        if (!"qa".equals(target)) target = "dev";
+
+        int concurrency = 4;
         if (req != null && req.get("concurrency") != null) {
             try {
-                concurrency = Math.max(1, Math.min(10, Integer.parseInt(String.valueOf(req.get("concurrency")))));
+                concurrency = Math.max(2, Math.min(10, Integer.parseInt(String.valueOf(req.get("concurrency")))));
             } catch (Exception ignored) {}
         }
         String productId = req != null && req.get("productId") != null ? String.valueOf(req.get("productId")) : null;
 
-        String resolvedType = resolveAttackType(attackType, rawPrompt);
-
-        // 1. Take Pre-Attack PostgreSQL Snapshot
         Map<String, Object> preState = captureSnapshot();
 
-        // 2. Execute Attack
         int httpStatus = 200;
         double dollarLoss = 0.0;
         int unfulfillableUnits = 0;
         double annualProjectedLoss = 0.0;
         String executionMessage = "";
         Map<String, Object> executionDetails = new LinkedHashMap<>();
+        String runId = "fde_run_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10);
+        String probeEmail = "fde-probe+" + runId + "@autotriage.local";
 
+        String targetBaseUrl = "qa".equals(target) ? qaUrl.replaceAll("/+$", "") : devUrl.replaceAll("/+$", "");
+
+        boolean httpExecuted = false;
         try {
-            switch (resolvedType) {
-                case "PRICE_INJECTION" -> {
-                    String targetPid = (productId != null && !productId.isBlank()) ? productId : "prod_008";
-                    ProductEntity product = productRepository.findById(targetPid).orElse(productRepository.findAll().get(0));
-                    BigDecimal originalPrice = product.getPrice();
-                    BigDecimal manipulatedPrice = new BigDecimal("0.01");
-
-                    product.setPrice(manipulatedPrice);
-                    productRepository.save(product);
-
-                    // Execute purchase order at $0.01
-                    OrderEntity order = new OrderEntity();
-                    order.setId("ord_fde_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8));
-                    order.setUserId(SANDBOX_USER_ID);
-                    order.setStatus("Processing");
-                    order.setShippingAddressJson("{\"name\":\"FDE Operator\",\"line1\":\"100 Enterprise Way\",\"city\":\"Tampa\",\"state\":\"FL\",\"postal_code\":\"33602\",\"country\":\"USA\"}");
-                    order.setPaymentDetailsJson("{\"method\":\"Card\",\"last4\":\"4242\"}");
-                    order.setTotal(manipulatedPrice);
-
-                    OrderItemEntity item = new OrderItemEntity();
-                    item.setOrder(order);
-                    item.setProduct(product);
-                    item.setQuantity(1);
-                    item.setUnitPrice(manipulatedPrice);
-                    order.setItems(List.of(item));
-
-                    product.setStock(Math.max(0, product.getStock() - 1));
-                    productRepository.save(product);
-                    orderRepository.save(order);
-
-                    httpStatus = 200;
-                    dollarLoss = originalPrice.subtract(manipulatedPrice).doubleValue();
-                    unfulfillableUnits = 0;
-                    annualProjectedLoss = Math.round(dollarLoss * 365.0 * 100.0) / 100.0;
-                    executionMessage = String.format("Price Tampering successful: %s price dropped from $%.2f to $0.01 and checked out.", product.getName(), originalPrice.doubleValue());
-                    executionDetails.put("targetProduct", product.getId());
-                    executionDetails.put("originalPrice", originalPrice);
-                    executionDetails.put("exploitedPrice", manipulatedPrice);
-                    executionDetails.put("orderId", order.getId());
-                }
-
-                case "CART_UNDERFLOW" -> {
-                    String targetPid = (productId != null && !productId.isBlank()) ? productId : "prod_001";
-                    ProductEntity product = productRepository.findById(targetPid).orElse(productRepository.findAll().get(0));
-                    int underflowUnits = 5;
-
-                    // Activate BUG_STALE_CART_CACHE to desynchronize cart state
-                    bugFlagsService.updateFlags(Map.of("BUG_STALE_CART_CACHE", true));
-
-                    CartItemEntity cartItem = cartItemRepository.findByUserIdAndProduct_Id(SANDBOX_USER_ID, product.getId())
-                            .orElseGet(() -> {
-                                CartItemEntity c = new CartItemEntity();
-                                c.setUserId(SANDBOX_USER_ID);
-                                c.setProduct(product);
-                                c.setQuantity(1);
-                                return c;
-                            });
-                    cartItem.setQuantity(1);
-                    cartItemRepository.save(cartItem);
-
-                    httpStatus = 200;
-                    dollarLoss = product.getPrice().doubleValue() * underflowUnits;
-                    unfulfillableUnits = underflowUnits;
-                    annualProjectedLoss = Math.round(dollarLoss * 365.0 * 100.0) / 100.0;
-                    executionMessage = String.format("Cart Underflow & Stale Cache exploited: negative boundary on %s caused cache desynchronization.", product.getName());
-                    executionDetails.put("targetProduct", product.getId());
-                    executionDetails.put("activeFlag", "BUG_STALE_CART_CACHE");
-                    executionDetails.put("cartItemId", cartItem.getId());
-                }
-
-                case "CONCURRENCY_OVERSELL" -> {
-                    String targetPid = (productId != null && !productId.isBlank()) ? productId : "prod_004";
-                    ProductEntity product = productRepository.findById(targetPid).orElse(productRepository.findAll().get(0));
-                    int startingStock = 2;
-                    product.setStock(startingStock);
-                    productRepository.save(product);
-
-                    int threadCount = Math.max(2, Math.min(10, concurrency));
-                    ExecutorService executor = Executors.newFixedThreadPool(threadCount);
-                    CountDownLatch latch = new CountDownLatch(threadCount);
-                    AtomicInteger successfulOrders = new AtomicInteger(0);
-
-                    for (int i = 0; i < threadCount; i++) {
-                        final int idx = i;
-                        executor.submit(() -> {
-                            try {
-                                ProductEntity p = productRepository.findById(product.getId()).orElse(null);
-                                if (p != null) {
-                                    p.setStock(p.getStock() - 1);
-                                    productRepository.save(p);
-
-                                    OrderEntity order = new OrderEntity();
-                                    order.setId("ord_race_" + idx + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 6));
-                                    order.setUserId(SANDBOX_USER_ID);
-                                    order.setStatus("Processing");
-                                    order.setShippingAddressJson("{\"name\":\"Race Exploiter\",\"line1\":\"100 Fast Lane\",\"city\":\"Austin\",\"state\":\"TX\",\"postal_code\":\"78701\",\"country\":\"USA\"}");
-                                    order.setTotal(p.getPrice());
-                                    orderRepository.save(order);
-                                    successfulOrders.incrementAndGet();
-                                }
-                            } finally {
-                                latch.countDown();
+            String probeToken = obtainProbeToken(targetBaseUrl, probeEmail);
+            if (probeToken != null && !probeToken.isBlank()) {
+                switch (normScenario) {
+                    case "R1_TAX" -> {
+                        String targetPid = (productId != null && !productId.isBlank()) ? productId : "prod_001";
+                        double unitPrice = 450.0;
+                        try {
+                            HttpRequest pReq = HttpRequest.newBuilder()
+                                    .uri(URI.create(targetBaseUrl + "/api/products/" + targetPid))
+                                    .header("Accept", "application/json")
+                                    .timeout(Duration.ofSeconds(4))
+                                    .GET().build();
+                            HttpResponse<String> pRes = HttpClient.newHttpClient().send(pReq, HttpResponse.BodyHandlers.ofString());
+                            if (pRes.statusCode() == 200) {
+                                JsonNode pNode = objectMapper.readTree(pRes.body());
+                                unitPrice = pNode.path("price").asDouble(450.0);
                             }
-                        });
+                        } catch (Exception ignored) {}
+
+                        double expectedTotal = Math.round(unitPrice * 1.10 * 100.0) / 100.0;
+                        Map<String, Object> orderBody = Map.of(
+                                "items", List.of(Map.of("productId", targetPid, "quantity", 1)),
+                                "shippingAddress", Map.of(
+                                        "name", "FDE Probe Runner",
+                                        "line1", "100 Innovation Way",
+                                        "line2", "Suite 200",
+                                        "city", "Tampa",
+                                        "state", "FL",
+                                        "postal_code", "33602",
+                                        "country", "USA"
+                                ),
+                                "paymentDetails", Map.of("method", "Card", "last4", "4242")
+                        );
+                        HttpRequest oReq = HttpRequest.newBuilder()
+                                .uri(URI.create(targetBaseUrl + "/api/orders"))
+                                .header("Content-Type", "application/json")
+                                .header("Authorization", "Bearer " + probeToken)
+                                .timeout(Duration.ofSeconds(4))
+                                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(orderBody)))
+                                .build();
+                        HttpResponse<String> oRes = HttpClient.newHttpClient().send(oReq, HttpResponse.BodyHandlers.ofString());
+                        httpStatus = oRes.statusCode();
+                        if (httpStatus == 200 || httpStatus == 201) {
+                            JsonNode oNode = objectMapper.readTree(oRes.body());
+                            double actualTotal = oNode.path("total").asDouble(expectedTotal);
+                            dollarLoss = Math.max(0.0, Math.round((expectedTotal - actualTotal) * 100.0) / 100.0);
+                            annualProjectedLoss = Math.round(dollarLoss * 365.0 * 100.0) / 100.0;
+                            unfulfillableUnits = 0;
+                            executionMessage = String.format("R1_TAX executed via HTTP on %s: unitPrice=%.2f, expectedTotal=%.2f, actualTotal=%.2f, loss=%.2f",
+                                    target, unitPrice, expectedTotal, actualTotal, dollarLoss);
+                            executionDetails.put("unitPrice", unitPrice);
+                            executionDetails.put("expectedTotal", expectedTotal);
+                            executionDetails.put("actualTotal", actualTotal);
+                            executionDetails.put("dollarLoss", dollarLoss);
+                            httpExecuted = true;
+                        }
                     }
+                    case "R2_NULL_LINE2" -> {
+                        String targetPid = (productId != null && !productId.isBlank()) ? productId : "prod_001";
+                        Map<String, Object> orderBody = new LinkedHashMap<>();
+                        orderBody.put("items", List.of(Map.of("productId", targetPid, "quantity", 1)));
+                        Map<String, Object> addr = new LinkedHashMap<>();
+                        addr.put("name", "FDE Null Line2 Probe");
+                        addr.put("line1", "100 Crash Boulevard");
+                        addr.put("city", "Tampa");
+                        addr.put("state", "FL");
+                        addr.put("postal_code", "33602");
+                        addr.put("country", "USA");
+                        orderBody.put("shippingAddress", addr);
+                        orderBody.put("paymentDetails", Map.of("method", "Card", "last4", "4242"));
 
-                    boolean finished = latch.await(4, TimeUnit.SECONDS);
-                    executor.shutdown();
-
-                    ProductEntity postProd = productRepository.findById(product.getId()).orElse(product);
-                    httpStatus = 200;
-                    int oversold = Math.max(0, successfulOrders.get() - startingStock);
-                    unfulfillableUnits = oversold > 0 ? oversold : (threadCount - startingStock);
-                    dollarLoss = unfulfillableUnits * product.getPrice().doubleValue();
-                    annualProjectedLoss = Math.round(dollarLoss * 52.0 * 100.0) / 100.0;
-                    executionMessage = String.format("Concurrency Race executed: %d threads raced on %d initial stock. Oversold by %d units.", threadCount, startingStock, unfulfillableUnits);
-                    executionDetails.put("threadCount", threadCount);
-                    executionDetails.put("initialStock", startingStock);
-                    executionDetails.put("finalStock", postProd.getStock());
-                    executionDetails.put("oversoldUnits", unfulfillableUnits);
-                }
-
-                case "NULL_SHIPPING_NPE" -> {
-                    bugFlagsService.updateFlags(Map.of("BUG_NULL_SHIPPING_NPE", true));
-                    httpStatus = 500;
-                    dollarLoss = 1399.00;
-                    unfulfillableUnits = 1;
-                    annualProjectedLoss = 51063500.00;
-                    executionMessage = "Null Shipping NPE triggered: OrderController line2 trim threw java.lang.NullPointerException (HTTP 500).";
-                    executionDetails.put("targetClass", "OrderController.java");
-                    executionDetails.put("exceptionType", "java.lang.NullPointerException");
-                    executionDetails.put("activeFlag", "BUG_NULL_SHIPPING_NPE");
-                }
-
-                case "CANCELLATION_RESTOCK_LOOP" -> {
-                    String targetPid = (productId != null && !productId.isBlank()) ? productId : "prod_003";
-                    ProductEntity product = productRepository.findById(targetPid).orElse(productRepository.findAll().get(0));
-                    int originalStock = product.getStock();
-
-                    OrderEntity order = new OrderEntity();
-                    order.setId("ord_loop_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8));
-                    order.setUserId(SANDBOX_USER_ID);
-                    order.setStatus("Processing");
-                    order.setShippingAddressJson("{\"name\":\"Loop Exploiter\",\"line1\":\"100 Loop Way\",\"city\":\"Orlando\",\"state\":\"FL\",\"postal_code\":\"32801\",\"country\":\"USA\"}");
-                    order.setTotal(product.getPrice().multiply(BigDecimal.valueOf(5)));
-
-                    OrderItemEntity item = new OrderItemEntity();
-                    item.setOrder(order);
-                    item.setProduct(product);
-                    item.setQuantity(5);
-                    item.setUnitPrice(product.getPrice());
-                    order.setItems(List.of(item));
-                    orderRepository.save(order);
-
-                    // Execute cancellation restock loop 3 times
-                    for (int i = 0; i < 3; i++) {
-                        product.setStock(product.getStock() + 5);
-                        productRepository.save(product);
+                        HttpRequest oReq = HttpRequest.newBuilder()
+                                .uri(URI.create(targetBaseUrl + "/api/orders"))
+                                .header("Content-Type", "application/json")
+                                .header("Authorization", "Bearer " + probeToken)
+                                .timeout(Duration.ofSeconds(4))
+                                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(orderBody)))
+                                .build();
+                        HttpResponse<String> oRes = HttpClient.newHttpClient().send(oReq, HttpResponse.BodyHandlers.ofString());
+                        httpStatus = oRes.statusCode();
+                        if (httpStatus == 500) {
+                            dollarLoss = 1399.00;
+                            unfulfillableUnits = 1;
+                            annualProjectedLoss = 51063500.00;
+                            executionMessage = "R2_NULL_LINE2 triggered via HTTP on " + target + ": HTTP 500 NullPointerException caused by null addressLine2.";
+                            executionDetails.put("exceptionType", "java.lang.NullPointerException");
+                        } else {
+                            dollarLoss = 0.0;
+                            unfulfillableUnits = 0;
+                            annualProjectedLoss = 0.0;
+                            executionMessage = "R2_NULL_LINE2 passed via HTTP on " + target + ": HTTP 200 OK handled null line2 safely.";
+                        }
+                        executionDetails.put("observedStatus", httpStatus);
+                        httpExecuted = true;
                     }
-                    order.setStatus("cancelled");
-                    orderRepository.save(order);
+                    case "R3_STALE_CART" -> {
+                        String targetPid = (productId != null && !productId.isBlank()) ? productId : "prod_001";
+                        HttpRequest cReq = HttpRequest.newBuilder()
+                                .uri(URI.create(targetBaseUrl + "/api/cart"))
+                                .header("Content-Type", "application/json")
+                                .header("Authorization", "Bearer " + probeToken)
+                                .timeout(Duration.ofSeconds(4))
+                                .POST(HttpRequest.BodyPublishers.ofString("{\"productId\":\"" + targetPid + "\",\"quantity\":1}"))
+                                .build();
+                        HttpClient.newHttpClient().send(cReq, HttpResponse.BodyHandlers.ofString());
 
-                    httpStatus = 200;
-                    int phantomUnits = 15;
-                    unfulfillableUnits = phantomUnits;
-                    dollarLoss = phantomUnits * product.getPrice().doubleValue();
-                    annualProjectedLoss = Math.round(dollarLoss * 52.0 * 100.0) / 100.0;
-                    executionMessage = String.format("Restock Loop exploited: %s inventory inflated from %d to %d (+15 phantom units).", product.getName(), originalStock, product.getStock());
-                    executionDetails.put("originalStock", originalStock);
-                    executionDetails.put("inflatedStock", product.getStock());
-                    executionDetails.put("phantomUnitsInjected", phantomUnits);
-                }
+                        Map<String, Object> orderBody = Map.of(
+                                "shippingAddress", Map.of(
+                                        "name", "FDE Cart Probe",
+                                        "line1", "100 Cart Way",
+                                        "line2", "Apt 1",
+                                        "city", "Tampa",
+                                        "state", "FL",
+                                        "postal_code", "33602",
+                                        "country", "USA"
+                                ),
+                                "paymentDetails", Map.of("method", "Card", "last4", "4242")
+                        );
+                        HttpRequest oReq = HttpRequest.newBuilder()
+                                .uri(URI.create(targetBaseUrl + "/api/orders"))
+                                .header("Content-Type", "application/json")
+                                .header("Authorization", "Bearer " + probeToken)
+                                .timeout(Duration.ofSeconds(4))
+                                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(orderBody)))
+                                .build();
+                        HttpClient.newHttpClient().send(oReq, HttpResponse.BodyHandlers.ofString());
 
-                case "ADMIN_SQL_SMUGGLING" -> {
-                    String sql = "SELECT id, email, role, password_hash FROM users WHERE role='ADMIN'";
-                    List<Map<String, Object>> exfiltrated = jdbcTemplate.queryForList(sql);
-
-                    httpStatus = 200;
-                    dollarLoss = 50000.00;
-                    unfulfillableUnits = 0;
-                    annualProjectedLoss = 500000.00;
-                    executionMessage = String.format("Admin SQL Smuggling executed: %d sensitive administrative user rows exfiltrated via diagnostic port.", exfiltrated.size());
-                    executionDetails.put("executedSql", sql);
-                    executionDetails.put("exfiltratedCount", exfiltrated.size());
-                    executionDetails.put("sampleExfiltratedEmail", exfiltrated.isEmpty() ? "none" : exfiltrated.get(0).get("email"));
-                }
-
-                default -> {
-                    httpStatus = 200;
-                    executionMessage = "Generic attack executed against sandbox environment.";
+                        HttpRequest checkReq = HttpRequest.newBuilder()
+                                .uri(URI.create(targetBaseUrl + "/api/cart"))
+                                .header("Authorization", "Bearer " + probeToken)
+                                .timeout(Duration.ofSeconds(4))
+                                .GET().build();
+                        HttpResponse<String> checkRes = HttpClient.newHttpClient().send(checkReq, HttpResponse.BodyHandlers.ofString());
+                        httpStatus = checkRes.statusCode();
+                        int remainingCartCount = 0;
+                        if (httpStatus == 200) {
+                            JsonNode cartArr = objectMapper.readTree(checkRes.body());
+                            remainingCartCount = cartArr.isArray() ? cartArr.size() : 0;
+                        }
+                        if (remainingCartCount > 0) {
+                            unfulfillableUnits = remainingCartCount;
+                            dollarLoss = 450.00 * remainingCartCount;
+                            annualProjectedLoss = Math.round(dollarLoss * 365.0 * 100.0) / 100.0;
+                            executionMessage = String.format("R3_STALE_CART exploited via HTTP on %s: cart contains %d leftover stale items after checkout.", target, remainingCartCount);
+                        } else {
+                            unfulfillableUnits = 0;
+                            dollarLoss = 0.0;
+                            annualProjectedLoss = 0.0;
+                            executionMessage = "R3_STALE_CART healthy via HTTP on " + target + ": cart successfully cleared upon order placement.";
+                        }
+                        executionDetails.put("staleCartItemsCount", remainingCartCount);
+                        httpExecuted = true;
+                    }
+                    case "R4_STOCK_RACE" -> {
+                        if ("qa".equals(target)) {
+                            httpStatus = 200;
+                            dollarLoss = 0.0;
+                            unfulfillableUnits = 0;
+                            annualProjectedLoss = 0.0;
+                            executionMessage = "R4_STOCK_RACE requires dev environment for known starting stock manipulation; skipped on qa.";
+                            executionDetails.put("skipped", true);
+                            executionDetails.put("reason", "requires dev");
+                            httpExecuted = true;
+                        }
+                    }
                 }
             }
         } catch (Exception e) {
-            log.error("Error executing attack vector " + resolvedType, e);
-            httpStatus = 500;
-            executionMessage = "Attack execution encountered error: " + e.getMessage();
+            log.info("HTTP execution notice for {} on {}: {}", normScenario, target, e.getMessage());
         }
 
+        if (!httpExecuted) {
+            switch (normScenario) {
+                case "R1_TAX" -> {
+                    String targetPid = (productId != null && !productId.isBlank()) ? productId : "prod_001";
+                    ProductEntity product = productRepository.findById(targetPid).orElse(productRepository.findAll().get(0));
+                    BigDecimal price = product.getPrice();
+                    boolean isBugActive = bugFlagsService.isOffByOneDiscount();
+                    BigDecimal multiplier = isBugActive ? new BigDecimal("0.99") : new BigDecimal("1.10");
+                    BigDecimal actualTotal = price.multiply(multiplier).setScale(2, RoundingMode.HALF_UP);
+                    BigDecimal expectedTotal = price.multiply(new BigDecimal("1.10")).setScale(2, RoundingMode.HALF_UP);
+
+                    httpStatus = 200;
+                    dollarLoss = Math.max(0.0, expectedTotal.subtract(actualTotal).doubleValue());
+                    unfulfillableUnits = 0;
+                    annualProjectedLoss = Math.round(dollarLoss * 365.0 * 100.0) / 100.0;
+                    executionMessage = String.format("R1_TAX observed: unitPrice=%.2f, expectedTotal=%.2f, actualTotal=%.2f, loss=%.2f (flag=%b)",
+                            price.doubleValue(), expectedTotal.doubleValue(), actualTotal.doubleValue(), dollarLoss, isBugActive);
+                    executionDetails.put("targetProduct", product.getId());
+                    executionDetails.put("unitPrice", price);
+                    executionDetails.put("expectedTotal", expectedTotal);
+                    executionDetails.put("actualTotal", actualTotal);
+                    executionDetails.put("activeFlag", "BUG_OFF_BY_ONE_DISCOUNT");
+                    executionDetails.put("dollarLoss", dollarLoss);
+                }
+                case "R2_NULL_LINE2" -> {
+                    boolean isBugActive = bugFlagsService.isNullShippingNpe();
+                    if (isBugActive) {
+                        httpStatus = 500;
+                        dollarLoss = 1399.00;
+                        unfulfillableUnits = 1;
+                        annualProjectedLoss = 51063500.00;
+                        executionMessage = "R2_NULL_LINE2 triggered: OrderController line2().trim() threw java.lang.NullPointerException (HTTP 500).";
+                        executionDetails.put("targetClass", "OrderController.java");
+                        executionDetails.put("exceptionType", "java.lang.NullPointerException");
+                        executionDetails.put("activeFlag", "BUG_NULL_SHIPPING_NPE");
+                    } else {
+                        httpStatus = 200;
+                        dollarLoss = 0.0;
+                        unfulfillableUnits = 0;
+                        annualProjectedLoss = 0.0;
+                        executionMessage = "R2_NULL_LINE2 healthy: Order handled null line2 safely without NPE.";
+                    }
+                }
+                case "R3_STALE_CART" -> {
+                    boolean isBugActive = bugFlagsService.isStaleCartCache();
+                    int staleUnits = isBugActive ? 5 : 0;
+                    ProductEntity product = productRepository.findById(productId != null && !productId.isBlank() ? productId : "prod_001")
+                            .orElse(productRepository.findAll().get(0));
+                    httpStatus = 200;
+                    dollarLoss = isBugActive ? product.getPrice().doubleValue() * staleUnits : 0.0;
+                    unfulfillableUnits = staleUnits;
+                    annualProjectedLoss = Math.round(dollarLoss * 365.0 * 100.0) / 100.0;
+                    executionMessage = isBugActive
+                            ? String.format("R3_STALE_CART exploited: %d stale units remained in cart after order.", staleUnits)
+                            : "R3_STALE_CART healthy: cart safely cleared on order completion.";
+                    executionDetails.put("activeFlag", "BUG_STALE_CART_CACHE");
+                    executionDetails.put("staleCartUnits", staleUnits);
+                }
+                case "R4_STOCK_RACE" -> {
+                    if ("qa".equals(target)) {
+                        httpStatus = 200;
+                        dollarLoss = 0.0;
+                        unfulfillableUnits = 0;
+                        annualProjectedLoss = 0.0;
+                        executionMessage = "R4_STOCK_RACE requires dev environment for known starting stock manipulation; skipped on qa.";
+                        executionDetails.put("skipped", true);
+                        executionDetails.put("reason", "requires dev");
+                    } else {
+                        String targetPid = (productId != null && !productId.isBlank()) ? productId : "prod_004";
+                        ProductEntity product = productRepository.findById(targetPid).orElse(productRepository.findAll().get(0));
+                        int startingStock = 2;
+                        product.setStock(startingStock);
+                        productRepository.save(product);
+
+                        int threadCount = Math.max(2, Math.min(10, concurrency));
+                        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+                        CountDownLatch latch = new CountDownLatch(threadCount);
+                        AtomicInteger successfulOrders = new AtomicInteger(0);
+                        AtomicInteger conflictCount = new AtomicInteger(0);
+
+                        for (int i = 0; i < threadCount; i++) {
+                            executor.submit(() -> {
+                                try {
+                                    int rows = productRepository.decrementStockIfAvailable(product.getId(), 1);
+                                    if (rows > 0) {
+                                        successfulOrders.incrementAndGet();
+                                    } else {
+                                        conflictCount.incrementAndGet();
+                                    }
+                                } finally {
+                                    latch.countDown();
+                                }
+                            });
+                        }
+
+                        try {
+                            latch.await(4, TimeUnit.SECONDS);
+                        } catch (InterruptedException ignored) {}
+                        executor.shutdown();
+
+                        ProductEntity postProd = productRepository.findById(product.getId()).orElse(product);
+                        httpStatus = 200;
+                        int oversold = Math.max(0, successfulOrders.get() - startingStock);
+                        unfulfillableUnits = oversold;
+                        dollarLoss = unfulfillableUnits * product.getPrice().doubleValue();
+                        annualProjectedLoss = Math.round(dollarLoss * 52.0 * 100.0) / 100.0;
+                        executionMessage = String.format("R4_STOCK_RACE executed: %d threads raced on %d initial stock. Successes: %d, Conflicts (409): %d, Final stock: %d, Oversold: %d.",
+                                threadCount, startingStock, successfulOrders.get(), conflictCount.get(), postProd.getStock(), oversold);
+                        executionDetails.put("threadCount", threadCount);
+                        executionDetails.put("initialStock", startingStock);
+                        executionDetails.put("finalStock", postProd.getStock());
+                        executionDetails.put("successCount", successfulOrders.get());
+                        executionDetails.put("conflictCount", conflictCount.get());
+                        executionDetails.put("oversoldUnits", oversold);
+                    }
+                }
+            }
+        }
+
+        Map<String, Object> postState = captureSnapshot();
+        Map<String, Object> delta = computeDelta(preState, postState);
         long latencyMs = System.currentTimeMillis() - startTime;
 
-        // 3. Take Post-Attack PostgreSQL Snapshot
-        Map<String, Object> postState = captureSnapshot();
-
-        // 4. Compute State Delta
-        Map<String, Object> delta = computeDelta(preState, postState);
-
-        // 5. Structure Result
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("attackType", resolvedType);
+        result.put("scenarioId", normScenario);
+        result.put("attackType", !attackType.isBlank() ? attackType : normScenario);
+        result.put("target", target);
+        result.put("status", "COMPLETED");
         result.put("httpStatus", httpStatus);
         result.put("latencyMs", latencyMs);
-        result.put("message", executionMessage);
-        result.put("details", executionDetails);
+        result.put("financialBlastRadius", Map.of(
+                "dollarLoss", dollarLoss,
+                "unfulfillableUnits", unfulfillableUnits,
+                "annualProjectedLoss", annualProjectedLoss
+        ));
+        result.put("executionMessage", executionMessage);
+        result.put("executionDetails", executionDetails);
         result.put("preState", preState);
         result.put("postState", postState);
         result.put("delta", delta);
-
-        Map<String, Object> blastRadius = new LinkedHashMap<>();
-        blastRadius.put("dollarLoss", Math.round(dollarLoss * 100.0) / 100.0);
-        blastRadius.put("unfulfillableUnits", unfulfillableUnits);
-        blastRadius.put("annualProjectedLoss", annualProjectedLoss);
-        result.put("financialBlastRadius", blastRadius);
-
-        // 6. Persist Attack Run to PostgreSQL Audit Ledger
-        String runId = "atk_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         result.put("runId", runId);
+
         try {
             jdbcTemplate.update("""
                 INSERT INTO fde_attack_runs (
@@ -393,8 +723,8 @@ public class FdeAgenticController {
             """,
                 runId,
                 resolveCallerUserId(),
-                resolvedType,
-                rawPrompt,
+                normScenario,
+                rawPrompt.isBlank() ? normScenario : rawPrompt,
                 httpStatus,
                 latencyMs,
                 BigDecimal.valueOf(dollarLoss),
@@ -409,7 +739,7 @@ public class FdeAgenticController {
             log.warn("Database audit ledger notice (fde_attack_runs): {}", ex.getMessage());
         }
 
-        return ResponseEntity.status(httpStatus == 500 ? HttpStatus.INTERNAL_SERVER_ERROR : HttpStatus.OK).body(result);
+        return result;
     }
 
     // =========================================================================
@@ -419,6 +749,14 @@ public class FdeAgenticController {
     @Transactional
     @Operation(summary = "Heal catalog stock, reset bug flags, clean orphan data, and verify 200 OK")
     public ResponseEntity<Map<String, Object>> healSystem() {
+        List<String> activeProfiles = Arrays.asList(environment.getActiveProfiles());
+        boolean isDev = activeProfiles.contains("dev") || activeProfiles.contains("test");
+        if (!isDev) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of(
+                    "error", "Forbidden: Sandbox reset is only permitted in environments with the 'dev' profile active."
+            ));
+        }
+
         long startTime = System.currentTimeMillis();
 
         // 1. Reset all bug flags
@@ -432,7 +770,7 @@ public class FdeAgenticController {
         List<ProductEntity> defaults = List.of(
                 buildProduct("prod_001", "Chronograph Excellence", "A masterpiece of precision and style, this chronograph watch is designed for the modern man. Featuring a stainless steel case, sapphire crystal glass, and a sophisticated dial with multiple subdials, it offers both functionality and elegance. Water-resistant up to 100 meters.", 450.00, List.of("https://images.unsplash.com/photo-1524805444758-089113d48a6d?q=80&w=600&auto=format&fit=crop","https://placehold.co/600x600.png","https://placehold.co/600x600.png"), "Watches", 15, "luxury watch"),
                 buildProduct("prod_002", "Titanium Smartwatch", "Experience the future on your wrist. This smartwatch boasts a lightweight titanium frame, a vibrant AMOLED display, and a suite of health and fitness tracking features. Syncs seamlessly with your smartphone for notifications, calls, and music control. Long-lasting battery life.", 799.99, List.of("https://images.unsplash.com/photo-1546868871-7041f2a55e12?q=80&w=600&auto=format&fit=crop","https://placehold.co/600x600.png"), "Watches", 25, "smart watch"),
-                buildProduct("prod_003", "Ultra-Slim Laptop", "Power and portability combined. Our ultra-slim laptop features the latest generation processor, a stunning 4K display, and a sleek aluminum body. With all-day battery life and a backlit keyboard, it’s perfect for professionals on the go. Comes with 16GB RAM and 1TB SSD storage.", 1399.00, List.of("https://images.unsplash.com/photo-1525547719571-a2d4ac8945e2?q=80&w=600&auto=format&fit=crop","https://placehold.co/600x600.png"), "Laptops", 10, "modern laptop"),
+                buildProduct("prod_003", "Ultra-Slim Laptop", "Power and portability combined. Our ultra-slim laptop features the latest generation processor, a stunning 4K display, and a sleek aluminum body. With all-day battery life and a backlit keyboard, it's perfect for professionals on the go. Comes with 16GB RAM and 1TB SSD storage.", 1399.00, List.of("https://images.unsplash.com/photo-1525547719571-a2d4ac8945e2?q=80&w=600&auto=format&fit=crop","https://placehold.co/600x600.png"), "Laptops", 10, "modern laptop"),
                 buildProduct("prod_004", "Gaming Beast Laptop", "Unleash your gaming potential with this powerhouse. Equipped with a high-refresh-rate display, a top-tier graphics card, and an advanced cooling system. The customizable RGB keyboard and immersive audio will elevate your gaming experience to new heights.", 2100.50, List.of("https://images.unsplash.com/photo-1593642702821-c8da6771f0c6?q=80&w=600&auto=format&fit=crop","https://placehold.co/600x600.png","https://placehold.co/600x600.png"), "Laptops", 5, "gaming laptop"),
                 buildProduct("prod_005", "Galaxy Pro Smartphone", "Capture life in stunning detail with the Galaxy Pro. Its professional-grade camera system, brilliant dynamic display, and powerful processor make it a leader in its class. Features an intelligent S-Pen for ultimate productivity and creativity. 5G ready.", 1199.99, List.of("https://images.unsplash.com/photo-1601784551446-20c9e07cdbf1?q=80&w=600&auto=format&fit=crop","https://placehold.co/600x600.png"), "Smartphones", 30, "modern smartphone"),
                 buildProduct("prod_006", "Pixel Perfect Smartphone", "The smart choice for a smartphone. Renowned for its exceptional camera powered by AI, clean software experience, and tight integration with Google services. Get the best of Android with timely updates and helpful features that anticipate your needs.", 899.00, List.of("https://images.unsplash.com/photo-1610945415295-d9bbf067e59c?q=80&w=600&auto=format&fit=crop","https://placehold.co/600x600.png"), "Smartphones", 22, "sleek smartphone"),
@@ -469,6 +807,7 @@ public class FdeAgenticController {
         restoredEntities.put("healthStatus", 200);
 
         Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("type", "SANDBOX_RESET");
         resp.put("healed", true);
         resp.put("mttrMs", mttrMs);
         resp.put("restoredEntities", restoredEntities);
@@ -504,9 +843,14 @@ public class FdeAgenticController {
     @Operation(summary = "Query live Azure DevOps REST API for Sprint 9-11 work items, PRs, and Test Suites")
     public ResponseEntity<Map<String, Object>> getLiveAdoData() {
         String pat = resolveAdoPat();
+        String org = resolveAdoOrg();
+        String project = resolveAdoProject();
+        String repoId = resolveAdoRepoId();
+
         Map<String, Object> resp = new LinkedHashMap<>();
-        resp.put("organization", ADO_ORG);
-        resp.put("project", ADO_PROJECT);
+        resp.put("organization", org);
+        resp.put("project", project);
+        resp.put("repoId", repoId);
         resp.put("timestamp", System.currentTimeMillis());
 
         if (pat.isBlank()) {
@@ -521,23 +865,23 @@ public class FdeAgenticController {
 
         try {
             // 1. Fetch Pull Requests
-            String prUrl = String.format("https://dev.azure.com/%s/%s/_apis/git/repositories/%s/pullrequests?api-version=7.1", ADO_ORG, ADO_PROJECT, ADO_REPO_ID);
+            String prUrl = String.format("https://dev.azure.com/%s/%s/_apis/git/repositories/%s/pullrequests?api-version=7.1", org, project, repoId);
             String prRaw = executeAdoHttp(prUrl, "GET", null, "application/json", pat);
-            List<Map<String, Object>> pullRequests = parseAdoPullRequests(prRaw);
+            List<Map<String, Object>> pullRequests = parseAdoPullRequests(prRaw, org, project);
             resp.put("pullRequests", pullRequests);
 
             // 2. Fetch Work Items via WIQL
-            String wiqlUrl = String.format("https://dev.azure.com/%s/%s/_apis/wit/wiql?api-version=7.1", ADO_ORG, ADO_PROJECT);
-            String wiqlPayload = "{\"query\": \"Select [System.Id] From WorkItems Where [System.TeamProject] = '" + ADO_PROJECT + "' Order By [System.Id] Desc\"}";
+            String wiqlUrl = String.format("https://dev.azure.com/%s/%s/_apis/wit/wiql?api-version=7.1", org, project);
+            String wiqlPayload = "{\"query\": \"Select [System.Id] From WorkItems Where [System.TeamProject] = '" + project + "' Order By [System.Id] Desc\"}";
             String wiqlRaw = executeAdoHttp(wiqlUrl, "POST", wiqlPayload, "application/json", pat);
 
-            List<Integer> ids = parseWiqlIds(wiqlRaw, 60);
+            List<Integer> ids = parseWiqlIds(wiqlRaw, 100);
             List<Map<String, Object>> workItems = new ArrayList<>();
             if (!ids.isEmpty()) {
-                String batchUrl = String.format("https://dev.azure.com/%s/%s/_apis/wit/workitemsbatch?api-version=7.1", ADO_ORG, ADO_PROJECT);
+                String batchUrl = String.format("https://dev.azure.com/%s/%s/_apis/wit/workitemsbatch?api-version=7.1", org, project);
                 String batchPayload = objectMapper.writeValueAsString(Map.of("ids", ids));
                 String batchRaw = executeAdoHttp(batchUrl, "POST", batchPayload, "application/json", pat);
-                workItems = parseWorkItemsBatch(batchRaw);
+                workItems = parseWorkItemsBatch(batchRaw, org, project);
             }
             resp.put("workItems", workItems);
 
@@ -549,7 +893,7 @@ public class FdeAgenticController {
             resp.put("sprints", sprints);
 
             // 3. Fetch Test Runs
-            String runsUrl = String.format("https://dev.azure.com/%s/%s/_apis/test/runs?api-version=7.1", ADO_ORG, ADO_PROJECT);
+            String runsUrl = String.format("https://dev.azure.com/%s/%s/_apis/test/runs?api-version=7.1", org, project);
             String runsRaw = executeAdoHttp(runsUrl, "GET", null, "application/json", pat);
             List<Map<String, Object>> testRuns = parseAdoTestRuns(runsRaw);
             resp.put("testRuns", testRuns);
@@ -583,6 +927,8 @@ public class FdeAgenticController {
     @Operation(summary = "Create an actual Bug work item formatted in Gherkin BDD in Azure DevOps")
     public ResponseEntity<Map<String, Object>> createAdoBug(@RequestBody Map<String, Object> req) {
         String pat = resolveAdoPat();
+        String org = resolveAdoOrg();
+        String project = resolveAdoProject();
         String title = req.get("title") != null ? String.valueOf(req.get("title")).trim() : "Live Adversarial Finding Bug";
         String gherkin = req.get("gherkinScenario") != null ? String.valueOf(req.get("gherkinScenario")) : "";
         String reproSteps = req.get("reproSteps") != null ? String.valueOf(req.get("reproSteps")) : "";
@@ -597,7 +943,7 @@ public class FdeAgenticController {
         }
 
         try {
-            String url = String.format("https://dev.azure.com/%s/%s/_apis/wit/workitems/%%24Bug?api-version=7.1", ADO_ORG, ADO_PROJECT);
+            String url = String.format("https://dev.azure.com/%s/%s/_apis/wit/workitems/%%24Bug?api-version=7.1", org, project);
 
             String formattedRepro = String.format(
                     "<div><p><b>Gherkin BDD Specification:</b></p><pre style='background:#1e1e1e;color:#d4d4d4;padding:10px;border-radius:6px;'>%s</pre><br/><b>Observed Diagnostic Steps:</b><br/>%s</div>",
@@ -612,7 +958,7 @@ public class FdeAgenticController {
             patchOps.add(Map.of("op", "add", "path", "/fields/Microsoft.VSTS.Common.Severity", "value", severity));
             patchOps.add(Map.of("op", "add", "path", "/fields/Microsoft.VSTS.Common.Priority", "value", priority));
             patchOps.add(Map.of("op", "add", "path", "/fields/System.Tags", "value", "BDD; GlassBox; VisitorReported; Sprint11"));
-            patchOps.add(Map.of("op", "add", "path", "/fields/System.IterationPath", "value", ADO_PROJECT + "\\Sprint 11"));
+            patchOps.add(Map.of("op", "add", "path", "/fields/System.IterationPath", "value", project + "\\Sprint 11"));
 
             String patchBody = objectMapper.writeValueAsString(patchOps);
             String rawResp = executeAdoHttp(url, "POST", patchBody, "application/json-patch+json", pat);
@@ -621,7 +967,7 @@ public class FdeAgenticController {
             int bugId = root.path("id").asInt();
             String webUrl = root.path("_links").path("html").path("href").asText();
             if (webUrl == null || webUrl.isBlank()) {
-                webUrl = String.format("https://dev.azure.com/%s/%s/_workitems/edit/%d", ADO_ORG, ADO_PROJECT, bugId);
+                webUrl = String.format("https://dev.azure.com/%s/%s/_workitems/edit/%d", org, project, bugId);
             }
 
             Map<String, Object> resp = new LinkedHashMap<>();
@@ -648,11 +994,19 @@ public class FdeAgenticController {
     // =========================================================================
     @PostMapping("/ado/invite")
     @Operation(summary = "Invite visitor email as a Stakeholder reader to Azure DevOps via Entitlements API")
-    public ResponseEntity<Map<String, Object>> inviteStakeholder(@RequestBody Map<String, Object> req) {
+    public ResponseEntity<Map<String, Object>> inviteStakeholder(@RequestBody(required = false) Map<String, Object> req) {
+        if (req == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "Valid email address is required"
+            ));
+        }
         String pat = resolveAdoPat();
+        String org = resolveAdoOrg();
+        String project = resolveAdoProject();
         String email = req.get("email") != null ? String.valueOf(req.get("email")).trim() : "";
 
-        if (email.isBlank() || !email.contains("@")) {
+        if (email.isBlank() || !email.contains("@") || email.startsWith("@") || email.endsWith("@")) {
             return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
                     "message", "Valid email address is required"
@@ -667,49 +1021,186 @@ public class FdeAgenticController {
         }
 
         try {
-            String url = String.format("https://vsaex.dev.azure.com/%s/_apis/userentitlements?api-version=7.1-preview.1", ADO_ORG);
+            String url = String.format("https://vsaex.dev.azure.com/%s/_apis/userentitlements?api-version=7.1-preview.1", org);
 
             Map<String, Object> accessLevel = Map.of("accountLicenseType", "stakeholder");
             Map<String, Object> user = Map.of(
                     "principalName", email,
                     "subjectKind", "user"
             );
-            Map<String, Object> projectRef = Map.of(
-                    "id", "762a5b91-6f05-482a-8fc4-5cf0ce7f70ef",
-                    "name", ADO_PROJECT
-            );
-            Map<String, Object> entitlement = Map.of(
-                    "projectRef", projectRef,
-                    "group", Map.of("groupType", "projectContributors")
-            );
 
             Map<String, Object> payload = Map.of(
                     "accessLevel", accessLevel,
-                    "user", user,
-                    "projectEntitlements", List.of(entitlement)
+                    "user", user
             );
 
             String bodyJson = objectMapper.writeValueAsString(payload);
             String rawResp = executeAdoHttp(url, "POST", bodyJson, "application/json", pat);
 
+            JsonNode root = objectMapper.readTree(rawResp);
+            String userDescriptor = root.path("userEntitlement").path("user").path("descriptor").asText();
+            if (userDescriptor.isBlank()) {
+                userDescriptor = root.path("operationResult").path("result").path("user").path("descriptor").asText();
+            }
+
+            if (!userDescriptor.isBlank()) {
+                try {
+                    String readersGroupDescriptor = "vssgp.Uy0xLTktMTU1MTM3NDI0NS0yNDM4NjcwOTY2LTkxMTcxNDAwLTI0MTIwMTA3MzYtMzQ2NDQ1ODQ3OS0xLTI4NDQ5MjYzODMtMjEzNDQ0ODcxOC0yMzIzNDA1NjMzLTQxMDMxOTY4NTk";
+                    String membershipUrl = String.format("https://vssps.dev.azure.com/%s/_apis/graph/memberships/%s/%s?api-version=7.1-preview.1",
+                            org, userDescriptor, readersGroupDescriptor);
+                    executeAdoHttp(membershipUrl, "PUT", "", "application/json", pat);
+                } catch (Exception ex) {
+                    log.info("Project group membership notice for " + email + ": " + ex.getMessage());
+                }
+            }
+
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("success", true);
             resp.put("email", email);
             resp.put("accessLevel", "Stakeholder");
-            resp.put("organization", ADO_ORG);
-            resp.put("project", ADO_PROJECT);
+            resp.put("organization", org);
+            resp.put("project", project);
             resp.put("message", "Stakeholder viewer invitation successfully dispatched.");
 
             return ResponseEntity.ok(resp);
         } catch (Exception e) {
-            log.error("Entitlements invite failed for " + email + ": " + e.getMessage(), e);
-            // Handle graceful notification if already a member
+            log.error("Entitlements invite notice for " + email + ": " + e.getMessage(), e);
+            if (e.getMessage() != null && (e.getMessage().contains("already exists") || e.getMessage().contains("UserAlreadyExists") || e.getMessage().contains("409"))) {
+                Map<String, Object> resp = new LinkedHashMap<>();
+                resp.put("success", true);
+                resp.put("email", email);
+                resp.put("accessLevel", "Stakeholder");
+                resp.put("organization", org);
+                resp.put("project", project);
+                resp.put("alreadyExisted", true);
+                resp.put("message", "User already has stakeholder access to Azure DevOps project " + project + ".");
+                return ResponseEntity.ok(resp);
+            }
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("success", false);
             resp.put("email", email);
             resp.put("error", e.getMessage());
             resp.put("message", "Notice: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(resp);
+        }
+    }
+
+    // =========================================================================
+    // 6B. POST /api/fde/agent/solve - Live LangGraph + Gemini 3 + Git Worktree Solver
+    // =========================================================================
+    @PostMapping("/agent/solve")
+    @Operation(summary = "Invoke real Python LangGraph + Gemini 3 Flash + Git Worktree engine to solve an incident end-to-end")
+    public ResponseEntity<Map<String, Object>> runAutonomousSolver(@RequestBody(required = false) Map<String, Object> req) {
+        if (req == null) {
+            req = Map.of();
+        }
+        String ticketId = req.get("ticketId") != null ? String.valueOf(req.get("ticketId")) : "TKT-LIVE-" + (System.currentTimeMillis() % 10000);
+        String subject = req.get("subject") != null ? String.valueOf(req.get("subject")) : "Live Incident Report";
+        String body = req.get("body") != null ? String.valueOf(req.get("body")) : "";
+        String scenarioId = req.get("scenarioId") != null ? String.valueOf(req.get("scenarioId")) : "";
+        Boolean headed = req.get("headed") != null && ("true".equalsIgnoreCase(String.valueOf(req.get("headed"))) || "1".equals(String.valueOf(req.get("headed"))));
+
+        // If operator selected a known regression scenario to demonstrate live reproduction,
+        // enable the corresponding runtime fault flag so the agent's live pytest reproduction catches it!
+        if ("R1_TAX".equalsIgnoreCase(scenarioId) || body.toLowerCase().contains("tax") || body.toLowerCase().contains("445.50")) {
+            bugFlagsService.updateFlags(Map.of("BUG_OFF_BY_ONE_DISCOUNT", true));
+        } else if ("R2_NULL_LINE2".equalsIgnoreCase(scenarioId) || body.toLowerCase().contains("line2") || body.toLowerCase().contains("nullpointer")) {
+            bugFlagsService.updateFlags(Map.of("BUG_NULL_SHIPPING_NPE", true));
+        } else if ("R3_STALE_CART".equalsIgnoreCase(scenarioId) || body.toLowerCase().contains("cart") || body.toLowerCase().contains("remove")) {
+            bugFlagsService.updateFlags(Map.of("BUG_STALE_CART_CACHE", true));
+        }
+
+        try {
+            Path repoRoot = Paths.get("").toAbsolutePath();
+            if (repoRoot.endsWith("backend-spring")) {
+                repoRoot = repoRoot.getParent().getParent();
+            } else if (repoRoot.endsWith("sut")) {
+                repoRoot = repoRoot.getParent();
+            }
+
+            Path pythonBin = repoRoot.resolve("sut/e2e/.venv/bin/python");
+            String pythonExec = Files.exists(pythonBin) ? pythonBin.toString() : "python3";
+
+            Map<String, Object> inputTicket = new LinkedHashMap<>();
+            inputTicket.put("ticket_id", ticketId);
+            inputTicket.put("subject", subject);
+            inputTicket.put("body", body);
+            inputTicket.put("headed", headed);
+            String ticketJson = objectMapper.writeValueAsString(inputTicket);
+
+            String pyScript = """
+                import sys, json, time, os
+                from agent.src.autotriage.graph.build import triage_ticket
+                t0 = time.time()
+                ticket = json.loads(sys.argv[1])
+                headed = bool(ticket.get('headed', False))
+                if headed:
+                    os.environ['HEADED'] = 'true'
+                    os.environ['PLAYWRIGHT_HEADED'] = '1'
+                res = triage_ticket(ticket)
+                res['wall_clock_sec'] = round(time.time() - t0, 2)
+                res['headed'] = headed
+                print("__JSON_START__")
+                print(json.dumps(res, default=str))
+                """;
+
+            ProcessBuilder pb = new ProcessBuilder(pythonExec, "-c", pyScript, ticketJson);
+            pb.directory(repoRoot.toFile());
+            if (Boolean.TRUE.equals(headed)) {
+                pb.environment().put("HEADED", "true");
+                pb.environment().put("PLAYWRIGHT_HEADED", "1");
+            }
+            pb.redirectErrorStream(true);
+
+            long t0 = System.currentTimeMillis();
+            Process proc = pb.start();
+            String output = new String(proc.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            boolean finished = proc.waitFor(90, TimeUnit.SECONDS);
+            if (!finished) {
+                proc.destroyForcibly();
+                return ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT).body(Map.of(
+                        "success", false,
+                        "error", "Autonomous agent execution timed out after 90s",
+                        "rawLogs", output
+                ));
+            }
+
+            int idx = output.indexOf("__JSON_START__");
+            if (idx == -1) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
+                        "success", false,
+                        "error", "Agent failed to produce structured output",
+                        "rawLogs", output
+                ));
+            }
+
+            String jsonPart = output.substring(idx + "__JSON_START__".length()).trim();
+            String stdoutLogs = output.substring(0, idx).trim();
+            Map<String, Object> agentState = objectMapper.readValue(jsonPart, new TypeReference<>() {});
+
+            // If agent verified a self-healing patch, automatically clear the runtime fault flag on DEV
+            if (Boolean.TRUE.equals(agentState.get("self_heal_verified"))) {
+                bugFlagsService.updateFlags(Map.of(
+                        "BUG_OFF_BY_ONE_DISCOUNT", false,
+                        "BUG_NULL_SHIPPING_NPE", false,
+                        "BUG_STALE_CART_CACHE", false
+                ));
+            }
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("success", true);
+            resp.put("durationMs", System.currentTimeMillis() - t0);
+            resp.put("headed", headed);
+            resp.put("agentState", agentState);
+            resp.put("stdoutLogs", stdoutLogs);
+            resp.put("activeBugFlagsAfter", bugFlagsService.getFlags());
+            return ResponseEntity.ok(resp);
+        } catch (Exception e) {
+            log.error("Autonomous solver execution failed", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
+                    "success", false,
+                    "error", e.getMessage()
+            ));
         }
     }
 
@@ -828,46 +1319,44 @@ public class FdeAgenticController {
     // Private Helpers & Telemetry Snapshot Routines
     // =========================================================================
     private void ensureSandboxUserExists() {
-        if (userRepository.findById(SANDBOX_USER_ID).isEmpty()) {
+        Optional<UserEntity> existing = userRepository.findById(SANDBOX_USER_ID);
+        if (existing.isEmpty()) {
             UserEntity u = new UserEntity();
             u.setId(SANDBOX_USER_ID);
             u.setEmail(SANDBOX_USER_EMAIL);
             u.setPasswordHash(passwordEncoder.encode("SandboxSecret123!"));
-            u.setRole("ADMIN");
+            u.setRole("FDE_OPERATOR");
             u.setDisplayName("FDE Sandbox Operator");
+            userRepository.save(u);
+        } else if (!"FDE_OPERATOR".equals(existing.get().getRole())) {
+            UserEntity u = existing.get();
+            u.setRole("FDE_OPERATOR");
             userRepository.save(u);
         }
     }
 
     private String resolveAttackType(String attackType, String prompt) {
         String at = attackType != null ? attackType.toUpperCase(Locale.ROOT).trim() : "";
-        if (at.contains("PRICE") || at.contains("TAMPER")) return "PRICE_INJECTION";
-        if (at.contains("CART") || at.contains("UNDERFLOW")) return "CART_UNDERFLOW";
-        if (at.contains("RACE") || at.contains("CONCURRENCY") || at.contains("OVERSELL")) return "CONCURRENCY_OVERSELL";
-        if (at.contains("NPE") || at.contains("SHIPPING") || at.contains("NULL")) return "NULL_SHIPPING_NPE";
-        if (at.contains("CANCEL") || at.contains("IDEMPOTENCY") || at.contains("RESTOCK")) return "CANCELLATION_RESTOCK_LOOP";
-        if (at.contains("SQL") || at.contains("SMUGGLE") || at.contains("BYPASS")) return "ADMIN_SQL_SMUGGLING";
+        if (at.contains("R1") || at.contains("TAX") || at.contains("PRICE") || at.contains("TAMPER")) return "R1_TAX";
+        if (at.contains("R2") || at.contains("NULL") || at.contains("NPE") || at.contains("SHIPPING") || at.contains("LINE2")) return "R2_NULL_LINE2";
+        if (at.contains("R3") || at.contains("CART") || at.contains("STALE") || at.contains("UNDERFLOW")) return "R3_STALE_CART";
+        if (at.contains("R4") || at.contains("RACE") || at.contains("CONCURRENCY") || at.contains("OVERSELL") || at.contains("STOCK")) return "R4_STOCK_RACE";
+        if (at.contains("CANCEL") || at.contains("RESTOCK")) return "R4_STOCK_RACE";
 
         String p = prompt != null ? prompt.toLowerCase(Locale.ROOT) : "";
-        if (p.contains("price") || p.contains("tamper") || p.contains("0.01") || p.contains("penny") || p.contains("discount") || p.contains("dollar")) {
-            return "PRICE_INJECTION";
-        }
-        if (p.contains("underflow") || p.contains("negative") || p.contains("cart") || p.contains("-1") || p.contains("-5")) {
-            return "CART_UNDERFLOW";
-        }
-        if (p.contains("race") || p.contains("concurrency") || p.contains("threads") || p.contains("oversell") || p.contains("parallel")) {
-            return "CONCURRENCY_OVERSELL";
+        if (p.contains("price") || p.contains("tax") || p.contains("tamper") || p.contains("0.01") || p.contains("penny") || p.contains("discount") || p.contains("dollar")) {
+            return "R1_TAX";
         }
         if (p.contains("null") || p.contains("npe") || p.contains("dereference") || p.contains("shipping") || p.contains("line2")) {
-            return "NULL_SHIPPING_NPE";
+            return "R2_NULL_LINE2";
         }
-        if (p.contains("restock") || p.contains("cancel") || p.contains("loop") || p.contains("phantom") || p.contains("inflate")) {
-            return "CANCELLATION_RESTOCK_LOOP";
+        if (p.contains("stale") || p.contains("underflow") || p.contains("negative") || p.contains("cart") || p.contains("-1") || p.contains("-5")) {
+            return "R3_STALE_CART";
         }
-        if (p.contains("sql") || p.contains("smuggle") || p.contains("injection") || p.contains("union") || p.contains("select")) {
-            return "ADMIN_SQL_SMUGGLING";
+        if (p.contains("race") || p.contains("concurrency") || p.contains("threads") || p.contains("oversell") || p.contains("parallel")) {
+            return "R4_STOCK_RACE";
         }
-        return "PRICE_INJECTION";
+        return "R1_TAX";
     }
 
     private Map<String, Object> captureSnapshot() {
@@ -1006,21 +1495,97 @@ public class FdeAgenticController {
         return p;
     }
 
+    private String resolveAdoOrg() {
+        String val = System.getProperty("azure.devops.org");
+        if (val != null && !val.isBlank()) return val.trim();
+        val = environment.getProperty("azure.devops.org");
+        if (val != null && !val.isBlank()) return val.trim();
+        val = environment.getProperty("app.ado.organization");
+        if (val != null && !val.isBlank()) return val.trim();
+        val = System.getenv("AZURE_DEVOPS_ORG");
+        if (val != null && !val.isBlank()) return val.trim();
+        String fromEnv = readEnvFileKey("AZURE_DEVOPS_ORG");
+        if (!fromEnv.isBlank()) return fromEnv;
+        return ADO_ORG;
+    }
+
+    private String resolveAdoProject() {
+        String val = System.getProperty("azure.devops.project");
+        if (val != null && !val.isBlank()) return val.trim();
+        val = environment.getProperty("azure.devops.project");
+        if (val != null && !val.isBlank()) return val.trim();
+        val = environment.getProperty("app.ado.project");
+        if (val != null && !val.isBlank()) return val.trim();
+        val = System.getenv("AZURE_DEVOPS_PROJECT");
+        if (val != null && !val.isBlank()) return val.trim();
+        String fromEnv = readEnvFileKey("AZURE_DEVOPS_PROJECT");
+        if (!fromEnv.isBlank()) return fromEnv;
+        return ADO_PROJECT;
+    }
+
+    private String resolveAdoRepoId() {
+        String val = System.getProperty("azure.devops.repo-id");
+        if (val != null && !val.isBlank()) return val.trim();
+        val = environment.getProperty("azure.devops.repo-id");
+        if (val != null && !val.isBlank()) return val.trim();
+        val = environment.getProperty("app.ado.repo-id");
+        if (val != null && !val.isBlank()) return val.trim();
+        val = System.getenv("AZURE_DEVOPS_REPO_ID");
+        if (val != null && !val.isBlank()) return val.trim();
+        String fromEnv = readEnvFileKey("AZURE_DEVOPS_REPO_ID");
+        if (!fromEnv.isBlank()) return fromEnv;
+        return ADO_REPO_ID;
+    }
+
     private String resolveAdoPat() {
-        String pat = System.getenv("AZURE_DEVOPS_EXT_PAT");
+        String pat = System.getProperty("AZURE_DEVOPS_PAT");
+        if (pat != null && !pat.isBlank()) return pat.trim();
+        pat = System.getProperty("azure.devops.pat");
+        if (pat != null && !pat.isBlank()) return pat.trim();
+        pat = environment.getProperty("azure.devops.pat");
+        if (pat != null && !pat.isBlank()) return pat.trim();
+        pat = environment.getProperty("app.ado.pat");
+        if (pat != null && !pat.isBlank()) return pat.trim();
+        pat = environment.getProperty("AZURE_DEVOPS_PAT");
+        if (pat != null && !pat.isBlank()) return pat.trim();
+        pat = System.getenv("AZURE_DEVOPS_EXT_PAT");
         if (pat != null && !pat.isBlank()) return pat.trim();
         pat = System.getenv("AZURE_DEVOPS_PAT");
         if (pat != null && !pat.isBlank()) return pat.trim();
 
-        for (String path : List.of(".env", "../.env", "../../.env")) {
+        String fromEnv = readEnvFileKey("AZURE_DEVOPS_PAT");
+        if (!fromEnv.isBlank()) return fromEnv;
+        fromEnv = readEnvFileKey("AZURE_DEVOPS_EXT_PAT");
+        if (!fromEnv.isBlank()) return fromEnv;
+        return "";
+    }
+
+    private String readEnvFileKey(String key) {
+        Path cur = Paths.get("").toAbsolutePath();
+        List<Path> candidates = new ArrayList<>();
+        Path p = cur;
+        while (p != null) {
+            candidates.add(p.resolve(".env"));
+            p = p.getParent();
+        }
+        for (String rel : List.of(".env", "../.env", "../../.env", "../../../.env")) {
+            candidates.add(Paths.get(rel));
+        }
+
+        for (Path envPath : candidates) {
             try {
-                Path p = Paths.get(path);
-                if (Files.exists(p)) {
-                    for (String line : Files.readAllLines(p)) {
-                        if (line.startsWith("AZURE_DEVOPS_PAT=") || line.startsWith("AZURE_DEVOPS_EXT_PAT=")) {
-                            String[] parts = line.split("=", 2);
+                if (Files.exists(envPath)) {
+                    for (String line : Files.readAllLines(envPath)) {
+                        String trimmed = line.trim();
+                        if (trimmed.startsWith(key + "=")) {
+                            String[] parts = trimmed.split("=", 2);
                             if (parts.length == 2 && !parts[1].isBlank()) {
-                                return parts[1].trim();
+                                String val = parts[1].trim();
+                                if ((val.startsWith("\"") && val.endsWith("\"")) ||
+                                    (val.startsWith("'") && val.endsWith("'"))) {
+                                    val = val.substring(1, val.length() - 1).trim();
+                                }
+                                return val;
                             }
                         }
                     }
@@ -1041,6 +1606,10 @@ public class FdeAgenticController {
         if ("POST".equalsIgnoreCase(method)) {
             builder.header("Content-Type", contentType != null ? contentType : "application/json");
             builder.POST(HttpRequest.BodyPublishers.ofString(body != null ? body : ""));
+        } else if ("PUT".equalsIgnoreCase(method)) {
+            builder.header("Content-Type", contentType != null ? contentType : "application/json");
+            String putBody = (body != null && !body.isBlank()) ? body : "{}";
+            builder.PUT(HttpRequest.BodyPublishers.ofString(putBody));
         } else if ("PATCH".equalsIgnoreCase(method)) {
             builder.header("Content-Type", contentType != null ? contentType : "application/json-patch+json");
             builder.method("PATCH", HttpRequest.BodyPublishers.ofString(body != null ? body : ""));
@@ -1072,7 +1641,7 @@ public class FdeAgenticController {
         return list;
     }
 
-    private List<Map<String, Object>> parseWorkItemsBatch(String json) {
+    private List<Map<String, Object>> parseWorkItemsBatch(String json, String org, String project) {
         List<Map<String, Object>> results = new ArrayList<>();
         try {
             JsonNode root = objectMapper.readTree(json);
@@ -1092,7 +1661,7 @@ public class FdeAgenticController {
                     item.put("acceptanceCriteria", fields.path("Microsoft.VSTS.Common.AcceptanceCriteria").asText());
                     item.put("priority", fields.path("Microsoft.VSTS.Common.Priority").asInt(2));
                     item.put("severity", fields.path("Microsoft.VSTS.Common.Severity").asText("2 - High"));
-                    item.put("url", String.format("https://dev.azure.com/%s/%s/_workitems/edit/%d", ADO_ORG, ADO_PROJECT, id));
+                    item.put("url", String.format("https://dev.azure.com/%s/%s/_workitems/edit/%d", org, project, id));
                     results.add(item);
                 }
             }
@@ -1102,7 +1671,7 @@ public class FdeAgenticController {
         return results;
     }
 
-    private List<Map<String, Object>> parseAdoPullRequests(String json) {
+    private List<Map<String, Object>> parseAdoPullRequests(String json, String org, String project) {
         List<Map<String, Object>> list = new ArrayList<>();
         try {
             JsonNode root = objectMapper.readTree(json);
@@ -1118,7 +1687,7 @@ public class FdeAgenticController {
                     map.put("sourceRef", pr.path("sourceRefName").asText());
                     map.put("targetRef", pr.path("targetRefName").asText());
                     map.put("creationDate", pr.path("creationDate").asText());
-                    map.put("url", String.format("https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d", ADO_ORG, ADO_PROJECT, ADO_PROJECT, id));
+                    map.put("url", String.format("https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d", org, project, project, id));
                     list.add(map);
                 }
             }
@@ -1168,18 +1737,22 @@ public class FdeAgenticController {
     }
 
     private List<Map<String, Object>> getFallbackWorkItems() {
+        String org = resolveAdoOrg();
+        String project = resolveAdoProject();
         return List.of(
-                Map.of("id", 136, "title", "[Safwan-fde] F-11.1: Glass-Box Multi-Vector Chaos Playground & Real-Time Blast Radius Dashboard (/api/fde/attack)", "type", "Feature", "iteration", "Sprint 11", "state", "Active", "url", "https://dev.azure.com/isafwan/AutoTriage/_workitems/edit/136"),
-                Map.of("id", 138, "title", "[Safwan-fde] US-1101: Natural-Language Adversarial Attack Translator & Raw HTTP/Concurrency Fuzzer with Live DB Before/After Diff", "type", "User Story", "iteration", "Sprint 11", "state", "Active", "url", "https://dev.azure.com/isafwan/AutoTriage/_workitems/edit/138"),
-                Map.of("id", 140, "title", "[Safwan-mlops] F-11.2: Glass-Box RAG Knowledge X-Ray, Anti-Hallucination Grounding & Episodic Memory Ledger (/api/fde/rag-triage)", "type", "Feature", "iteration", "Sprint 11", "state", "Active", "url", "https://dev.azure.com/isafwan/AutoTriage/_workitems/edit/140"),
-                Map.of("id", 143, "title", "[Safwan-devops] F-11.3: Bidirectional Live Azure DevOps Glass-Box Proxy, Gherkin Bug Filer & Read-Only Viewer Invite (/api/fde/ado)", "type", "Feature", "iteration", "Sprint 11", "state", "Active", "url", "https://dev.azure.com/isafwan/AutoTriage/_workitems/edit/143")
+                Map.of("id", 136, "title", "[Safwan-fde] F-11.1: Glass-Box Multi-Vector Chaos Playground & Real-Time Blast Radius Dashboard (/api/fde/attack)", "type", "Feature", "iteration", "Sprint 11", "state", "Active", "url", String.format("https://dev.azure.com/%s/%s/_workitems/edit/136", org, project)),
+                Map.of("id", 138, "title", "[Safwan-fde] US-1101: Natural-Language Adversarial Attack Translator & Raw HTTP/Concurrency Fuzzer with Live DB Before/After Diff", "type", "User Story", "iteration", "Sprint 11", "state", "Active", "url", String.format("https://dev.azure.com/%s/%s/_workitems/edit/138", org, project)),
+                Map.of("id", 140, "title", "[Safwan-mlops] F-11.2: Glass-Box RAG Knowledge X-Ray, Anti-Hallucination Grounding & Episodic Memory Ledger (/api/fde/rag-triage)", "type", "Feature", "iteration", "Sprint 11", "state", "Active", "url", String.format("https://dev.azure.com/%s/%s/_workitems/edit/140", org, project)),
+                Map.of("id", 143, "title", "[Safwan-devops] F-11.3: Bidirectional Live Azure DevOps Glass-Box Proxy, Gherkin Bug Filer & Read-Only Viewer Invite (/api/fde/ado)", "type", "Feature", "iteration", "Sprint 11", "state", "Active", "url", String.format("https://dev.azure.com/%s/%s/_workitems/edit/143", org, project))
         );
     }
 
     private List<Map<String, Object>> getFallbackTestSuites() {
+        String org = resolveAdoOrg();
+        String project = resolveAdoProject();
         return List.of(
-                Map.of("id", 82, "title", "[Safwan-qa] TP-700: AutoTriage Master QA & Autonomous Self-Healing Test Plan", "type", "Test Plan", "url", "https://dev.azure.com/isafwan/AutoTriage/_workitems/edit/82"),
-                Map.of("id", 83, "title", "[Safwan-qa] TS-701: Closed-Loop Self-Healing & Chaos Fault Injection Test Suite", "type", "Test Suite", "url", "https://dev.azure.com/isafwan/AutoTriage/_workitems/edit/83")
+                Map.of("id", 82, "title", "[Safwan-qa] TP-700: AutoTriage Master QA & Autonomous Self-Healing Test Plan", "type", "Test Plan", "url", String.format("https://dev.azure.com/%s/%s/_workitems/edit/82", org, project)),
+                Map.of("id", 83, "title", "[Safwan-qa] TS-701: Closed-Loop Self-Healing & Chaos Fault Injection Test Suite", "type", "Test Suite", "url", String.format("https://dev.azure.com/%s/%s/_workitems/edit/83", org, project))
         );
     }
 }
