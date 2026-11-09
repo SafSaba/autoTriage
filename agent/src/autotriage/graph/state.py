@@ -29,11 +29,15 @@ class TriageState(TypedDict, total=False):
     wad_spec: Optional[str]
     wad_rationale: Optional[str]
 
-    # Automated Test Reproduction
+    # Automated Test Reproduction & Visual Viewport
     test_to_run: Optional[str]
     repro_status: str  # "CONFIRMED", "CANNOT_REPRODUCE", "SKIPPED"
     repro_error_summary: Optional[str]
     repro_duration_sec: float
+    headed: Optional[bool]
+    screenshot_url: Optional[str]
+    screenshot_base64: Optional[str]
+    repro_steps: Optional[List[Any]]
 
     # Code Ownership & Resolution
     assigned_owner: Optional[str]
@@ -53,6 +57,14 @@ class TriageState(TypedDict, total=False):
     operation_id: Optional[str]
     suspect_file: Optional[str]
     suspect_line: Optional[int]
+    suspect_start_line: Optional[int]
+    suspect_end_line: Optional[int]
+    grounding_verified: Optional[bool]
+    reasoning_mode: Optional[str]  # "llm" or "deterministic_fallback"
+    tokens_consumed: Optional[int]
+    llm_latency_sec: Optional[float]
+    patch_status: Optional[str]
+    patch_diff: Optional[str]
     pr_url: Optional[str]
     pr_id: Optional[int]
     self_heal_verified: bool
