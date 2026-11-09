@@ -14,6 +14,7 @@ Uses BM25 lexical ranking + exact token boosting for deterministic, hallucinatio
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +28,7 @@ app = MCPServer("autotriage-rag")
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 CORPUS_FILE = BASE_DIR / "knowledge" / "corpus" / "rag_knowledge_chunks.jsonl"
 BACKLOG_FILE = BASE_DIR / "knowledge" / "workitems" / "jira_ado_backlog.json"
+CONTROLLERS_DIR = BASE_DIR / "sut" / "backend-spring" / "src" / "main" / "java" / "com" / "autotriage" / "shop" / "controller"
 
 CHUNKS: List[Dict[str, Any]] = []
 TOKENIZED_CORPUS: List[List[str]] = []
@@ -244,6 +246,244 @@ def list_knowledge_sources() -> List[Dict[str, Any]]:
         }
         for c in CHUNKS
     ]
+
+
+def parse_java_file_methods(file_path: Path) -> List[Dict[str, Any]]:
+    """Parses a Java controller source file to extract methods, annotations, and line ranges."""
+    if not file_path.exists():
+        return []
+    lines = file_path.read_text(encoding="utf-8").splitlines()
+    methods: List[Dict[str, Any]] = []
+    current_annotations: List[str] = []
+    annotation_start_line: Optional[int] = None
+
+    method_sig_pattern = re.compile(
+        r"^\s*(public|protected|private)\s+(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?(?:[\w<>\[\],\s\?]+)\s+(\w+)\s*\((.*)"
+    )
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped.startswith("@"):
+            if not current_annotations:
+                annotation_start_line = i + 1
+            current_annotations.append(stripped)
+            i += 1
+            continue
+
+        if ("class " not in stripped and "interface " not in stripped and "record " not in stripped and "enum " not in stripped):
+            match = method_sig_pattern.match(line)
+            if match and not stripped.endswith(";"):
+                method_name = match.group(2)
+                start_line = annotation_start_line if annotation_start_line is not None else (i + 1)
+
+                brace_count = 0
+                found_brace = False
+                end_line = start_line
+                j = i
+                while j < len(lines):
+                    l = lines[j]
+                    for char in l:
+                        if char == "{":
+                            brace_count += 1
+                            found_brace = True
+                        elif char == "}":
+                            brace_count -= 1
+                    if found_brace and brace_count == 0:
+                        end_line = j + 1
+                        break
+                    j += 1
+
+                snippet_lines = lines[start_line - 1 : end_line]
+                snippet = "\n".join(snippet_lines[:50])
+
+                methods.append({
+                    "file": file_path.name,
+                    "controller": file_path.stem,
+                    "method": method_name,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "line_count": end_line - start_line + 1,
+                    "annotations": list(current_annotations),
+                    "snippet": snippet,
+                })
+
+                current_annotations = []
+                annotation_start_line = None
+                i = max(i + 1, end_line)
+                continue
+
+        if stripped and not stripped.startswith("//") and not stripped.startswith("/*") and not stripped.startswith("*"):
+            current_annotations = []
+            annotation_start_line = None
+        i += 1
+
+    return methods
+
+
+@app.tool()
+def search_codebase_ast(query: str, controller_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Parses actual Java controller files under sut/backend-spring/.../controller/
+    extracting method signatures, annotations, exact lines, and scoring against the query.
+    Args:
+        query: Natural language symptom or code symbol (e.g. '0.99 discount', 'stock decrement', 'createOrder').
+        controller_name: Optional filter by controller file/class name.
+    """
+    if not CONTROLLERS_DIR.exists():
+        return []
+
+    java_files = sorted(CONTROLLERS_DIR.glob("*.java"))
+    if controller_name:
+        clean = controller_name.strip().lower()
+        if clean.endswith(".java"):
+            clean = clean[:-5]
+        java_files = [f for f in java_files if clean in f.stem.lower() or clean in f.name.lower()]
+
+    all_methods: List[Dict[str, Any]] = []
+    for jf in java_files:
+        all_methods.extend(parse_java_file_methods(jf))
+
+    query_tokens = [t.lower() for t in re.findall(r"\w+", query) if len(t) > 1]
+    if not query_tokens:
+        return []
+
+    scored_chunks: List[Dict[str, Any]] = []
+    for m in all_methods:
+        ann_str = " ".join(m["annotations"])
+        haystack = f"{m['file']} {m['controller']} {m['method']} {ann_str} {m['snippet']}".lower()
+        haystack_tokens = [t.lower() for t in re.findall(r"\w+", haystack) if len(t) > 1]
+
+        matches = 0
+        freq = 0
+        for qt in query_tokens:
+            cnt = haystack_tokens.count(qt)
+            if cnt > 0:
+                matches += 1
+                freq += cnt
+
+        if matches > 0:
+            overlap = matches / len(query_tokens)
+            score = overlap * 0.7 + min(1.0, freq / 10.0) * 0.3
+            if query.lower() in m["method"].lower():
+                score += 0.2
+            score = round(min(1.0, score), 3)
+
+            scored_chunks.append({
+                "file": m["file"],
+                "controller": m["controller"],
+                "method": m["method"],
+                "start_line": m["start_line"],
+                "end_line": m["end_line"],
+                "line_count": m["line_count"],
+                "annotations": m["annotations"],
+                "snippet": m["snippet"],
+                "score": score,
+            })
+
+    scored_chunks.sort(key=lambda x: x["score"], reverse=True)
+    return scored_chunks[:10]
+
+
+@app.tool()
+def get_git_diff_hunks(base_sha: str = "HEAD~1", head_sha: str = "HEAD") -> List[Dict[str, Any]]:
+    """
+    Executes git diff between base_sha and head_sha across sut/backend-spring/src/main/java/
+    and returns parsed diff hunks with exact lines and changed methods.
+    Args:
+        base_sha: Starting git commit or ref (defaults to HEAD~1).
+        head_sha: Ending git commit or ref (defaults to HEAD).
+    """
+    diff_target = f"{base_sha}..{head_sha}"
+    check = subprocess.run(
+        ["git", "rev-parse", "--verify", base_sha],
+        cwd=BASE_DIR,
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode != 0:
+        check2 = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD~1"],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if check2.returncode != 0:
+            diff_target = "HEAD"
+        else:
+            diff_target = f"HEAD~1..{head_sha}"
+
+    cmd = ["git", "diff", "-U3", diff_target, "--", "sut/backend-spring/src/main/java/"]
+    res = subprocess.run(cmd, cwd=BASE_DIR, capture_output=True, text=True)
+    if res.returncode != 0 or not res.stdout.strip():
+        res = subprocess.run(
+            ["git", "diff", "-U3", "HEAD", "--", "sut/backend-spring/src/main/java/"],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            return []
+
+    diff_output = res.stdout
+    hunks: List[Dict[str, Any]] = []
+    current_file = ""
+    lines = diff_output.splitlines()
+    i = 0
+    hunk_header_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:\s*(.*))?")
+
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                current_file = parts[3].lstrip("b/")
+            i += 1
+            continue
+
+        match = hunk_header_re.match(line)
+        if match and current_file:
+            old_start = int(match.group(1))
+            old_lines = int(match.group(2)) if match.group(2) else 1
+            new_start = int(match.group(3))
+            new_lines = int(match.group(4)) if match.group(4) else 1
+            context_hint = match.group(5) or ""
+
+            hunk_lines = [line]
+            changed_methods: List[str] = []
+            if context_hint:
+                meth_match = re.search(r"(\w+)\s*\(", context_hint)
+                if meth_match:
+                    changed_methods.append(meth_match.group(1))
+
+            i += 1
+            while i < len(lines) and not lines[i].startswith("@@ ") and not lines[i].startswith("diff --git "):
+                hunk_lines.append(lines[i])
+                if lines[i].startswith("+"):
+                    added = lines[i][1:]
+                    m = re.search(r"\b(public|protected|private)\s+.*?\b(\w+)\s*\(", added)
+                    if m:
+                        meth_name = m.group(2)
+                        if meth_name not in changed_methods:
+                            changed_methods.append(meth_name)
+                i += 1
+
+            hunks.append({
+                "file": current_file,
+                "old_start": old_start,
+                "old_lines": old_lines,
+                "new_start": new_start,
+                "new_lines": new_lines,
+                "diff_snippet": "\n".join(hunk_lines),
+                "changed_methods": changed_methods,
+            })
+            continue
+
+        i += 1
+
+    return hunks
 
 
 if __name__ == "__main__":
