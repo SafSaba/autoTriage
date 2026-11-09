@@ -19,6 +19,7 @@ Operating directly between continuous integration pipelines, cloud observability
 | **QA Staging** | Automated Canary & Regression Gate | Azure Static Web Apps | [Open QA Staging](https://jolly-sky-018d2b40f.1.azurestaticapps.net/) |
 | **PROD Release** | Release v1.1.0 Baseline Storefront | Azure Static Web Apps | [Open PROD Release](https://happy-coast-030e3060f.1.azurestaticapps.net/) |
 | **Azure DevOps** | Sprint Boards, Epics & Work Item Audit | Azure DevOps Services | [AutoTriage Backlog & Board](https://dev.azure.com/isafwan/AutoTriage) |
+| **GitHub Project** | Agile Roadmap & Sprint 11 Board | GitHub Projects v2 | [AutoTriage Roadmap & Board](https://github.com/users/SafSaba/projects/6) |
 
 ---
 
