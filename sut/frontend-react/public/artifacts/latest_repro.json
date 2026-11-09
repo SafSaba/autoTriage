@@ -1,0 +1,25 @@
+{
+  "test_id": "tests/test_api_and_bugs.py::test_autotriage_repro_stale_cart_delete[chromium]",
+  "repro_steps": [
+    {
+      "step": "Step 1",
+      "action": "Log in as buyer and open /cart with prod_001 present",
+      "expected": "Cart contains 1 item (Chronograph Excellence)",
+      "actual": "",
+      "status": "passed",
+      "timestamp": 1794213569.0047019
+    },
+    {
+      "step": "Step 2",
+      "action": "Trigger deletion of prod_001 and reload cart page",
+      "expected": "Cart is empty ('Your cart is empty')",
+      "actual": "Observed items remaining: 1",
+      "status": "passed",
+      "timestamp": 1794213583.768758
+    }
+  ],
+  "screenshot_url": "/artifacts/latest_repro_frame.png",
+  "failed": true,
+  "error": "tests/test_api_and_bugs.py:288: in test_autotriage_repro_stale_cart_delete\n    assert len(items) == 0, f\"Expected 0 items in cart after deletion but got {len(items)}\"\nE   AssertionError: Expected 0 items in cart after deletion but got 1\nE   assert 1 == 0\nE    +  where 1 = len([{'product': {'id': 'prod_001', 'name': 'Chronograph Excellence', 'description': 'A masterpiece of precision and style...s, it offers both functionality and elegance. Water-resistant up to 100 meters.', 'price': 450.0, ...}, 'quantity': 1}])",
+  "updated_at": 1794213584.9233332
+}
