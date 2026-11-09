@@ -264,6 +264,34 @@ export const api = {
       apiFetch<FdeHealResponse>('/api/fde/heal', {
         method: 'POST',
       }),
+    healSandbox: (): Promise<FdeHealSandboxResponse> =>
+      apiFetch<FdeHealSandboxResponse>('/api/fde/heal', {
+        method: 'POST',
+      }),
+    getReleases: async (): Promise<FdeReleasesResponse> => {
+      const res = await apiFetch<FdeReleasesResponse>('/api/fde/releases');
+      if (res.environments) {
+        if (!res.dev && res.environments.dev) res.dev = res.environments.dev;
+        if (!res.qa && res.environments.qa) res.qa = res.environments.qa;
+        if (!res.prod && res.environments.prod) res.prod = res.environments.prod;
+      }
+      return res;
+    },
+    getSelfRelease: (): Promise<FdeReleaseEnvInfo> =>
+      apiFetch<FdeReleaseEnvInfo>('/api/fde/releases/self'),
+    runScenario: (id: string, target: 'dev' | 'qa' = 'dev'): Promise<FdeScenarioRunResponse> =>
+      apiFetch<FdeScenarioRunResponse>(`/api/fde/scenarios/${encodeURIComponent(id)}/run`, {
+        method: 'POST',
+        body: JSON.stringify({ target }),
+      }),
+    compareScenario: async (id: string): Promise<FdeScenarioCompareResponse> => {
+      const res = await apiFetch<FdeScenarioCompareResponse>(`/api/fde/compare/${encodeURIComponent(id)}`, {
+        method: 'POST',
+      });
+      if (!res.devResult && res.dev) res.devResult = res.dev;
+      if (!res.qaResult && res.qa) res.qaResult = res.qa;
+      return res;
+    },
     getAdoLive: () => apiFetch<FdeAdoLiveResponse>('/api/fde/ado/live'),
     createAdoBug: (payload: FdeAdoBugRequest) =>
       apiFetch<FdeAdoBugResponse>('/api/fde/ado/bugs', {
@@ -288,6 +316,11 @@ export const api = {
       }>(`/api/fde/history?limit=${limit}`),
     triage: (payload: { query: string; attackType?: string }) =>
       apiFetch<FdeRagTriageResponse>('/api/fde/rag-triage', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    solveWithAgent: (payload: { ticketId?: string; subject: string; body: string; scenarioId?: string; headed?: boolean }) =>
+      apiFetch<FdeAgentSolveResponse>('/api/fde/agent/solve', {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
@@ -340,41 +373,67 @@ export interface FdeHealResponse {
   details: string;
 }
 
+export interface FdeAdoWorkItem {
+  id: number;
+  title: string;
+  type: string;
+  state: string;
+  assignedTo: string;
+  storyPoints?: number;
+  url?: string;
+  iteration?: string;
+  severity?: string;
+  priority?: number;
+}
+
+export interface FdeAdoPullRequest {
+  pullRequestId: number;
+  title: string;
+  sourceBranch: string;
+  targetBranch: string;
+  status: string;
+  createdBy: string;
+  url: string;
+}
+
+export interface FdeAdoTestSuite {
+  planId?: number;
+  planName?: string;
+  suiteId?: number;
+  suiteName?: string;
+  runCount?: number;
+  passRate?: string;
+  id?: number;
+  title?: string;
+  type?: string;
+  state?: string;
+}
+
 export interface FdeAdoLiveResponse {
   organization: string;
   project: string;
-  repoId: string;
-  sprints: Array<{
+  repoId?: string;
+  connected?: boolean;
+  message?: string;
+  count?: number;
+  timestamp?: number;
+  workItems?: FdeAdoWorkItem[];
+  sprints?: Record<string, any> | Array<{
     id: string;
     name: string;
-    startDate: string;
-    finishDate: string;
-    itemsCount: number;
-    items: Array<{
-      id: number;
-      title: string;
-      type: string;
-      state: string;
-      assignedTo: string;
-      storyPoints?: number;
-    }>;
+    startDate?: string;
+    finishDate?: string;
+    itemsCount?: number;
+    items: FdeAdoWorkItem[];
   }>;
-  pullRequests: Array<{
-    pullRequestId: number;
-    title: string;
-    sourceBranch: string;
-    targetBranch: string;
-    status: string;
-    createdBy: string;
-    url: string;
-  }>;
-  testSuites: Array<{
-    planId: number;
-    planName: string;
-    suiteId: number;
-    suiteName: string;
-    runCount: number;
-    passRate: string;
+  pullRequests: FdeAdoPullRequest[];
+  testSuites?: FdeAdoTestSuite[];
+  testRuns?: Array<{
+    id?: number;
+    name?: string;
+    state?: string;
+    totalTests?: number;
+    passedTests?: number;
   }>;
 }
 
@@ -453,4 +512,137 @@ export interface FdeRagTriageResponse {
     episode?: FdeMemoryEpisode;
   };
   ragContext: FdeRagResponse;
+}
+
+export interface FdeReleaseEnvInfo {
+  environment?: string;
+  version: string;
+  gitSha: string | null;
+  gitBranch: string | null;
+  buildTime: string | null;
+  flywayVersion: string | null;
+  flywayInstalledOn?: string | null;
+  activeBugFlags?: Record<string, boolean>;
+}
+
+export interface FdeEnvironmentProbe {
+  name: string;
+  url: string;
+  readOnly: boolean;
+  reachable: boolean;
+  data: FdeReleaseEnvInfo | null;
+  error: string | null;
+}
+
+export interface FdeReleasesResponse {
+  self: FdeReleaseEnvInfo;
+  environments?: {
+    dev: FdeEnvironmentProbe;
+    qa: FdeEnvironmentProbe;
+    prod: FdeEnvironmentProbe;
+  };
+  dev?: FdeEnvironmentProbe;
+  qa?: FdeEnvironmentProbe;
+  prod?: FdeEnvironmentProbe;
+}
+
+export interface FdeScenarioRunResponse {
+  scenarioId: string;
+  attackType?: string;
+  target: 'dev' | 'qa' | string;
+  status: string;
+  httpStatus: number;
+  latencyMs: number;
+  financialBlastRadius: {
+    dollarLoss: number;
+    unfulfillableUnits: number;
+    annualProjectedLoss: number;
+  };
+  executionMessage: string;
+  executionDetails: Record<string, any>;
+  preState?: any;
+  postState?: any;
+  delta?: any;
+  runId?: string;
+}
+
+export interface FdeScenarioCompareResponse {
+  scenarioId: string;
+  dev: FdeScenarioRunResponse;
+  qa: FdeScenarioRunResponse;
+  devResult?: FdeScenarioRunResponse;
+  qaResult?: FdeScenarioRunResponse;
+  driftDetected: boolean;
+  driftSummary: Array<{
+    field: string;
+    dev: any;
+    qa: any;
+    description: string;
+  }>;
+}
+
+export interface FdeHealSandboxResponse {
+  healed: boolean;
+  type: string;
+  message: string;
+  mttrMs?: number;
+  restoredEntities?: Record<string, any>;
+  missionId?: string;
+}
+
+export interface FdeAgentSolveResponse {
+  success: boolean;
+  durationMs: number;
+  agentState: {
+    ticket_id: string;
+    subject: string;
+    body: string;
+    sanitized_body?: string;
+    injection_score?: number;
+    is_quarantined?: boolean;
+    quarantine_reason?: string | null;
+    is_working_as_designed?: boolean;
+    wad_spec?: string;
+    wad_rationale?: string;
+    rag_citations?: string[];
+    rag_context?: string;
+    test_to_run?: string;
+    repro_status?: string;
+    repro_error_summary?: string;
+    repro_duration_sec?: number;
+    repro_screenshot?: string;
+    screenshot_url?: string;
+    screenshot_base64?: string;
+    repro_steps?: any[];
+    headed?: boolean;
+    classification?: string;
+    action_path?: string;
+    assigned_owner?: string;
+    owner_status?: string;
+    suspect_file?: string;
+    suspect_start_line?: number;
+    suspect_end_line?: number;
+    grounding_verified?: boolean;
+    reasoning_mode?: string;
+    tokens_consumed?: number;
+    llm_latency_sec?: number;
+    created_work_item_id?: string | number;
+    jira_url?: string;
+    ado_url?: string;
+    patch_status?: string;
+    patch_diff?: string;
+    pr_url?: string;
+    pr_id?: string | number;
+    self_heal_verified?: boolean;
+    adversarial_critic_badge?: string;
+    finops_receipt?: {
+      tokens_consumed: number;
+      autonomous_mttr_sec: number;
+      reasoning_mode: string;
+    };
+    triage_notes?: string;
+    wall_clock_sec?: number;
+  };
+  stdoutLogs: string;
+  activeBugFlagsAfter: Record<string, boolean>;
 }

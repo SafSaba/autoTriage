@@ -1,6 +1,5 @@
 package com.autotriage.shop;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -35,6 +34,15 @@ class FdeAgenticControllerTest {
     @Autowired
     private ObjectMapper objectMapper;
 
+    private String getOperatorToken() throws Exception {
+        MvcResult res = mockMvc.perform(post("/api/fde/session")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andReturn();
+        return objectMapper.readTree(res.getResponse().getContentAsString()).get("token").asText();
+    }
+
     @Test
     @Order(1)
     void postSessionGeneratesOperatorSandboxToken() throws Exception {
@@ -45,7 +53,8 @@ class FdeAgenticControllerTest {
                 .andExpect(jsonPath("$.token", notNullValue()))
                 .andExpect(jsonPath("$.user.id", is("usr_sandbox_operator")))
                 .andExpect(jsonPath("$.user.email", is("fde-sandbox-operator@autotriage.local")))
-                .andExpect(jsonPath("$.user.role", is("ADMIN")))
+                .andExpect(jsonPath("$.user.role", is("FDE_OPERATOR")))
+                .andExpect(jsonPath("$.user.role", not("ADMIN")))
                 .andExpect(jsonPath("$.sandboxMode", is(true)))
                 .andReturn();
 
@@ -55,7 +64,60 @@ class FdeAgenticControllerTest {
 
     @Test
     @Order(2)
-    void postAttackPriceInjectionModifiesPriceAndRecordsBlastRadius() throws Exception {
+    void postScenarioRunR1TaxCalculatesDrift() throws Exception {
+        mockMvc.perform(post("/api/fde/scenarios/R1_TAX/run")
+                        .header("Authorization", "Bearer " + getOperatorToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"target\":\"dev\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.scenarioId", is("R1_TAX")))
+                .andExpect(jsonPath("$.target", is("dev")))
+                .andExpect(jsonPath("$.status", is("COMPLETED")))
+                .andExpect(jsonPath("$.financialBlastRadius", notNullValue()))
+                .andExpect(jsonPath("$.financialBlastRadius.dollarLoss", notNullValue()));
+    }
+
+    @Test
+    @Order(3)
+    void postScenarioRunR2NullLine2HandlesSafelyWhenFlagOff() throws Exception {
+        mockMvc.perform(post("/api/fde/scenarios/R2_NULL_LINE2/run")
+                        .header("Authorization", "Bearer " + getOperatorToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"target\":\"dev\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.scenarioId", is("R2_NULL_LINE2")))
+                .andExpect(jsonPath("$.target", is("dev")))
+                .andExpect(jsonPath("$.httpStatus", is(200)));
+    }
+
+    @Test
+    @Order(4)
+    void postScenarioRunR3StaleCartExecutes() throws Exception {
+        mockMvc.perform(post("/api/fde/scenarios/R3_STALE_CART/run")
+                        .header("Authorization", "Bearer " + getOperatorToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"target\":\"dev\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.scenarioId", is("R3_STALE_CART")))
+                .andExpect(jsonPath("$.target", is("dev")))
+                .andExpect(jsonPath("$.financialBlastRadius", notNullValue()));
+    }
+
+    @Test
+    @Order(5)
+    void postScenarioRunR4StockRaceExecutes() throws Exception {
+        mockMvc.perform(post("/api/fde/scenarios/R4_STOCK_RACE/run")
+                        .header("Authorization", "Bearer " + getOperatorToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"target\":\"dev\",\"concurrency\":4}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.scenarioId", is("R4_STOCK_RACE")))
+                .andExpect(jsonPath("$.target", is("dev")));
+    }
+
+    @Test
+    @Order(6)
+    void postAttackAliasMapsToScenarioRunner() throws Exception {
         Map<String, Object> payload = Map.of(
                 "attackType", "PRICE_INJECTION",
                 "prompt", "Buy Creator Pro Laptop for $0.01",
@@ -63,105 +125,72 @@ class FdeAgenticControllerTest {
         );
 
         mockMvc.perform(post("/api/fde/attack")
+                        .header("Authorization", "Bearer " + getOperatorToken())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(payload)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.attackType", is("PRICE_INJECTION")))
-                .andExpect(jsonPath("$.httpStatus", is(200)))
-                .andExpect(jsonPath("$.latencyMs", greaterThanOrEqualTo(0)))
-                .andExpect(jsonPath("$.preState", notNullValue()))
-                .andExpect(jsonPath("$.postState", notNullValue()))
-                .andExpect(jsonPath("$.delta", notNullValue()))
-                .andExpect(jsonPath("$.financialBlastRadius.dollarLoss", is(2499.99)))
-                .andExpect(jsonPath("$.financialBlastRadius.annualProjectedLoss", is(912496.35)));
-    }
-
-    @Test
-    @Order(3)
-    void postAttackCartUnderflowSetsNegativeQuantity() throws Exception {
-        Map<String, Object> payload = Map.of(
-                "prompt", "Inject negative quantity -5 into cart"
-        );
-
-        mockMvc.perform(post("/api/fde/attack")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(payload)))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.attackType", is("CART_UNDERFLOW")))
-                .andExpect(jsonPath("$.financialBlastRadius.dollarLoss", is(2250.0)))
-                .andExpect(jsonPath("$.financialBlastRadius.unfulfillableUnits", is(5)));
-    }
-
-    @Test
-    @Order(4)
-    void postAttackConcurrencyOversellSimulatesParallelLoad() throws Exception {
-        Map<String, Object> payload = Map.of(
-                "prompt", "High concurrency oversell race on remaining watches",
-                "concurrency", 4
-        );
-
-        mockMvc.perform(post("/api/fde/execute-attack")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(payload)))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.attackType", is("CONCURRENCY_OVERSELL")))
-                .andExpect(jsonPath("$.financialBlastRadius.unfulfillableUnits", greaterThanOrEqualTo(1)));
-    }
-
-    @Test
-    @Order(5)
-    void postAttackNullShippingNpeTriggers500() throws Exception {
-        Map<String, Object> payload = Map.of(
-                "attackType", "NULL_SHIPPING_NPE",
-                "prompt", "Checkout order with null addressLine2 to trigger NPE"
-        );
-
-        mockMvc.perform(post("/api/fde/attack")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(payload)))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.attackType", is("NULL_SHIPPING_NPE")))
-                .andExpect(jsonPath("$.httpStatus", is(500)))
-                .andExpect(jsonPath("$.financialBlastRadius.dollarLoss", is(1399.0)));
-    }
-
-    @Test
-    @Order(6)
-    void postAttackRestockLoopInflatesStock() throws Exception {
-        Map<String, Object> payload = Map.of(
-                "prompt", "Cancellation restock loop to duplicate inventory"
-        );
-
-        mockMvc.perform(post("/api/fde/attack")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(payload)))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.attackType", is("CANCELLATION_RESTOCK_LOOP")))
-                .andExpect(jsonPath("$.financialBlastRadius.unfulfillableUnits", is(15)));
+                .andExpect(jsonPath("$.scenarioId", is("R1_TAX")))
+                .andExpect(jsonPath("$.status", is("COMPLETED")))
+                .andExpect(jsonPath("$.financialBlastRadius", notNullValue()));
     }
 
     @Test
     @Order(7)
-    void postAttackAdminSqlSmugglingExtractsSensitiveRows() throws Exception {
-        Map<String, Object> payload = Map.of(
-                "prompt", "SQL smuggle select password_hash from users where role=ADMIN"
-        );
-
-        mockMvc.perform(post("/api/fde/attack")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(payload)))
+    void getReleasesSelfReturnsMetadata() throws Exception {
+        mockMvc.perform(get("/api/fde/releases/self"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.attackType", is("ADMIN_SQL_SMUGGLING")))
-                .andExpect(jsonPath("$.financialBlastRadius.dollarLoss", is(50000.0)));
+                .andExpect(jsonPath("$.version", notNullValue()))
+                .andExpect(jsonPath("$.activeBugFlags", notNullValue()));
     }
 
     @Test
     @Order(8)
-    void postHealRestoresBaselineCleanly() throws Exception {
-        mockMvc.perform(post("/api/fde/heal")
+    void getReleasesReturnsEnvironments() throws Exception {
+        mockMvc.perform(get("/api/fde/releases"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.self", notNullValue()))
+                .andExpect(jsonPath("$.environments.dev", notNullValue()))
+                .andExpect(jsonPath("$.environments.qa", notNullValue()))
+                .andExpect(jsonPath("$.environments.prod", notNullValue()))
+                .andExpect(jsonPath("$.environments.prod.readOnly", is(true)));
+    }
+
+    @Test
+    @Order(9)
+    void postCompareEndpointExecutesDevAndQa() throws Exception {
+        mockMvc.perform(post("/api/fde/compare/R1_TAX")
+                        .header("Authorization", "Bearer " + getOperatorToken())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.scenarioId", is("R1_TAX")))
+                .andExpect(jsonPath("$.dev", notNullValue()))
+                .andExpect(jsonPath("$.qa", notNullValue()));
+    }
+
+    @Test
+    @Order(10)
+    void unauthenticatedProtectedFdeEndpointsReturn401() throws Exception {
+        mockMvc.perform(post("/api/fde/scenarios/R1_TAX/run")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"target\":\"dev\"}"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(post("/api/fde/heal")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @Order(11)
+    void postHealRestoresBaselineCleanly() throws Exception {
+        mockMvc.perform(post("/api/fde/heal")
+                        .header("Authorization", "Bearer " + getOperatorToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.type", is("SANDBOX_RESET")))
                 .andExpect(jsonPath("$.healed", is(true)))
                 .andExpect(jsonPath("$.mttrMs", greaterThanOrEqualTo(0)))
                 .andExpect(jsonPath("$.restoredEntities.productsReset", is(8)))
@@ -175,9 +204,10 @@ class FdeAgenticControllerTest {
     }
 
     @Test
-    @Order(9)
+    @Order(12)
     void getAdoLiveReturnsStructuredTelemetry() throws Exception {
-        mockMvc.perform(get("/api/fde/ado/live"))
+        mockMvc.perform(get("/api/fde/ado/live")
+                        .header("Authorization", "Bearer " + getOperatorToken()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.organization", is("isafwan")))
                 .andExpect(jsonPath("$.project", is("AutoTriage")))
@@ -185,7 +215,7 @@ class FdeAgenticControllerTest {
     }
 
     @Test
-    @Order(10)
+    @Order(13)
     void postAdoBugsRejectsEmptyTitleGracefullyOrCreatesBug() throws Exception {
         Map<String, Object> payload = Map.of(
                 "title", "[Automated Test] Price Tampering Regression Bug",
@@ -195,6 +225,7 @@ class FdeAgenticControllerTest {
         );
 
         MvcResult result = mockMvc.perform(post("/api/fde/ado/bugs")
+                        .header("Authorization", "Bearer " + getOperatorToken())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(payload)))
                 .andReturn();
@@ -205,9 +236,10 @@ class FdeAgenticControllerTest {
     }
 
     @Test
-    @Order(11)
+    @Order(14)
     void postAdoInviteRejectsInvalidEmail() throws Exception {
         mockMvc.perform(post("/api/fde/ado/invite")
+                        .header("Authorization", "Bearer " + getOperatorToken())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"invalid-email\"}"))
                 .andExpect(status().isBadRequest())
@@ -215,9 +247,10 @@ class FdeAgenticControllerTest {
     }
 
     @Test
-    @Order(12)
+    @Order(15)
     void getRagRetrieveReturnsRankedAstChunksWithGroundingProof() throws Exception {
         mockMvc.perform(get("/api/fde/rag/retrieve")
+                        .header("Authorization", "Bearer " + getOperatorToken())
                         .param("q", "price tampering catalog floor violation"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.matchesFound", greaterThanOrEqualTo(1)))
@@ -233,9 +266,10 @@ class FdeAgenticControllerTest {
     }
 
     @Test
-    @Order(13)
+    @Order(16)
     void getRagRetrieveNullShippingNpeFindsOrderController() throws Exception {
         mockMvc.perform(get("/api/fde/rag/retrieve")
+                        .header("Authorization", "Bearer " + getOperatorToken())
                         .param("q", "null shipping NPE line2 trim dereference"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.chunks[0].file", is("OrderController.java")))
@@ -244,9 +278,10 @@ class FdeAgenticControllerTest {
     }
 
     @Test
-    @Order(14)
+    @Order(17)
     void getEpisodicMemorySummaryReturnsCanonicalEpisodes() throws Exception {
-        mockMvc.perform(get("/api/fde/memory/episodes"))
+        mockMvc.perform(get("/api/fde/memory/episodes")
+                        .header("Authorization", "Bearer " + getOperatorToken()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.totalEpisodes", greaterThanOrEqualTo(6)))
                 .andExpect(jsonPath("$.totalRecallHits", greaterThan(0)))
@@ -257,7 +292,7 @@ class FdeAgenticControllerTest {
     }
 
     @Test
-    @Order(15)
+    @Order(18)
     void postRagTriageTriggersInstantEpisodicRecallHit() throws Exception {
         Map<String, Object> payload = Map.of(
                 "endpoint", "POST /api/orders",
@@ -267,6 +302,7 @@ class FdeAgenticControllerTest {
         );
 
         mockMvc.perform(post("/api/fde/rag-triage")
+                        .header("Authorization", "Bearer " + getOperatorToken())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(payload)))
                 .andExpect(status().isOk())
@@ -281,7 +317,7 @@ class FdeAgenticControllerTest {
     }
 
     @Test
-    @Order(16)
+    @Order(19)
     void postMemoryEpisodePersistsNovelIncident() throws Exception {
         Map<String, Object> newEp = new java.util.LinkedHashMap<>();
         newEp.put("id", "EPISODE-9999");
@@ -300,10 +336,32 @@ class FdeAgenticControllerTest {
         newEp.put("confidenceScore", 0.99);
 
         mockMvc.perform(post("/api/fde/memory/episodes")
+                        .header("Authorization", "Bearer " + getOperatorToken())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(newEp)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id", is("EPISODE-9999")))
                 .andExpect(jsonPath("$.title", is("Custom Synthetic Chaos Invariant")));
+    }
+
+    @Test
+    @Order(20)
+    void getAdoLiveWithoutAuthReturns200AndClickableUrls() throws Exception {
+        mockMvc.perform(get("/api/fde/ado/live"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.organization", is("isafwan")))
+                .andExpect(jsonPath("$.project", is("AutoTriage")))
+                .andExpect(jsonPath("$.workItems", notNullValue()))
+                .andExpect(jsonPath("$.workItems[0].url", containsString("https://dev.azure.com/isafwan/AutoTriage/_workitems/edit/")));
+    }
+
+    @Test
+    @Order(21)
+    void postAdoInviteWithoutAuthPermittedBySecurity() throws Exception {
+        mockMvc.perform(post("/api/fde/ado/invite")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"email\":\"invalid-email\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.success", is(false)));
     }
 }

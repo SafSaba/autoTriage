@@ -150,3 +150,23 @@ class TestLangGraphAutoTriageAgent:
         assert res.get("created_work_item_id") is None
         assert res.get("test_to_run") is None
         assert res["slack_alert_sent"] is True
+
+    def test_reproduce_node_returns_screenshot_and_steps(self):
+        """Validates that reproduce_node returns screenshot_url, screenshot_base64, and repro_steps."""
+        from agent.src.autotriage.graph.nodes import reproduce_node
+        state = {
+            "ticket_id": "TKT-101",
+            "customer_email": "buyer@autotriage.local",
+            "subject": "Charged wrong total at checkout - discount instead of 10% tax?",
+            "sanitized_body": "I ordered 1 Chronograph Excellence watch ($450.00). Instead of adding 10% tax ($495.00), my order confirmation total was $445.50!",
+            "active_bug_flag": "BUG_OFF_BY_ONE_DISCOUNT",
+            "rag_citations": ["PRD-001"],
+            "headed": False,
+        }
+        res = reproduce_node(state)
+        assert res["repro_status"] == "CONFIRMED"
+        assert res["screenshot_url"] == "/artifacts/latest_repro_frame.png"
+        assert res["screenshot_base64"] is not None
+        assert isinstance(res["repro_steps"], list)
+        assert len(res["repro_steps"]) > 0
+        assert res["headed"] is False

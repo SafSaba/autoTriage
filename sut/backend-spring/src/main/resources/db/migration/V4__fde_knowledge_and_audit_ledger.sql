@@ -136,4 +136,4 @@ INSERT INTO fde_episodic_memories (
     'Scenario: Prevent diagnostic SQL from exfiltrating user credentials\n  Given an administrative diagnostic query targeting the users table\n  When POST /api/admin/db/query is submitted with SQL containing ''FROM users''\n  Then the request is rejected with HTTP 403 Forbidden.',
     30, 23, 0.9700
 )
-ON CONFLICT (id) DO NOTHING;
+;
