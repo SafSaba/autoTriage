@@ -253,6 +253,22 @@ class TestFastMCPPlaywrightRunnerServer:
         assert res["status"] == "PASSED"
         assert res["exit_code"] == 0
         assert res["duration_sec"] > 0
+        assert "screenshot_url" in res
+        assert "repro_steps" in res
+        assert res["headed"] is False
+
+    def test_run_test_headed_toggle_and_visual_screenshot(self):
+        """Validates headed execution toggle and visual screenshot capture."""
+        res = run_test(
+            "tests/test_api_and_bugs.py::test_autotriage_repro_tax_calculation",
+            headed=False,
+            timeout_sec=30,
+        )
+        assert res["status"] == "PASSED"
+        assert res["screenshot_url"] == "/artifacts/latest_repro_frame.png"
+        assert res["screenshot_base64"] is not None
+        assert isinstance(res["repro_steps"], list)
+        assert len(res["repro_steps"]) > 0
 
 
 class TestFastMCPNotifyServer:
