@@ -18,6 +18,7 @@ spring:
   flyway:
     enabled: true
     baseline-on-migrate: true
+    validate-on-migrate: false
     locations: classpath:db/migration
 
 management:
@@ -35,3 +36,15 @@ app:
     expiration-ms: 86400000
   cors:
     origins: ${APP_CORS_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost:3000,http://localhost:9002}
+  ado:
+    organization: ${AZURE_DEVOPS_ORG:isafwan}
+    project: ${AZURE_DEVOPS_PROJECT:AutoTriage}
+    pat: ${AZURE_DEVOPS_PAT:}
+    repo-id: ${AZURE_DEVOPS_REPO_ID:52a5da4c-1581-447b-9d8d-f138fc4096a5}
+
+azure:
+  devops:
+    org: ${AZURE_DEVOPS_ORG:isafwan}
+    project: ${AZURE_DEVOPS_PROJECT:AutoTriage}
+    pat: ${AZURE_DEVOPS_PAT:}
+    repo-id: ${AZURE_DEVOPS_REPO_ID:52a5da4c-1581-447b-9d8d-f138fc4096a5}

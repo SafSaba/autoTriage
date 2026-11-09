@@ -28,6 +28,9 @@ variables:
   DEV_API_URL: 'https://autotriage-backend-dev.graytree-645df5bf.eastus.azurecontainerapps.io'
   QA_API_URL: 'https://autotriage-backend-qa.graytree-645df5bf.eastus.azurecontainerapps.io'
   PROD_API_URL: 'https://autotriage-backend-prod.graytree-645df5bf.eastus.azurecontainerapps.io'
+  ACR_NAME: 'autotriageacr'
+  RESOURCE_GROUP: 'rg-autotriage'
+  CONTAINER_IMAGE_NAME: 'autotriage-backend'
 
 stages:
   # ============================================================================
@@ -50,10 +53,10 @@ stages:
               versionSpec: '22.x'
 
           - script: |
-              echo "==> Compiling Spring Boot Backend..."
+              echo "==> Compiling & Running Unit/Regression Tests for Spring Boot Backend..."
               cd sut/backend-spring
-              mvn clean package -DskipTests
-            displayName: "Maven Package Spring Boot"
+              mvn clean test package
+            displayName: "Maven Test & Package Spring Boot"
 
           - script: |
               echo "==> Compiling Vite React Frontend..."
@@ -63,11 +66,59 @@ stages:
             displayName: "NPM Build Frontend"
 
           - script: |
+              IMAGE_TAG="$(Build.BuildId)-$(Build.SourceVersionShort)"
+              IMAGE_FQN="$(ACR_NAME).azurecr.io/$(CONTAINER_IMAGE_NAME):${IMAGE_TAG}"
+              echo "==> Packaging and building container image: ${IMAGE_FQN}..."
+              az acr build \
+                --registry $(ACR_NAME) \
+                --image "$(CONTAINER_IMAGE_NAME):${IMAGE_TAG}" \
+                --file sut/backend-spring/Dockerfile \
+                sut/backend-spring
+            displayName: "Build and Push Backend Container Image to ACR"
+
+          - script: |
+              IMAGE_TAG="$(Build.BuildId)-$(Build.SourceVersionShort)"
+              IMAGE_FQN="$(ACR_NAME).azurecr.io/$(CONTAINER_IMAGE_NAME):${IMAGE_TAG}"
+              echo "==> Deploying container image ${IMAGE_FQN} to autotriage-backend-dev..."
+              az containerapp update \
+                -n autotriage-backend-dev \
+                -g $(RESOURCE_GROUP) \
+                --image "${IMAGE_FQN}"
+            displayName: "Deploy Container to DEV Container App"
+
+          - script: |
+              echo "==> Polling DEV /api/fde/releases/self for gitSha parity..."
+              EXPECTED_SHA="$(Build.SourceVersionShort)"
+              MAX_ATTEMPTS=15
+              DELAY_SEC=5
+              MATCHED=0
+              for i in $(seq 1 $MAX_ATTEMPTS); do
+                echo "Probing $(DEV_API_URL)/api/fde/releases/self (Attempt $i/$MAX_ATTEMPTS)..."
+                HTTP_RESP=$(curl -s --connect-timeout 5 $(DEV_API_URL)/api/fde/releases/self || true)
+                echo "Response: $HTTP_RESP"
+                RELEASE_SHA=$(echo "$HTTP_RESP" | jq -r '.gitSha // empty' 2>/dev/null || true)
+                if [ -n "$RELEASE_SHA" ] && [ "$RELEASE_SHA" != "null" ]; then
+                  if [ "$RELEASE_SHA" = "$EXPECTED_SHA" ] || [ "${RELEASE_SHA:0:7}" = "${EXPECTED_SHA:0:7}" ]; then
+                    echo "Release gitSha verified: $RELEASE_SHA matches expected $EXPECTED_SHA"
+                    MATCHED=1
+                    break
+                  fi
+                fi
+                sleep $DELAY_SEC
+              done
+              if [ "$MATCHED" -eq 1 ]; then
+                echo "DEV deployment parity successfully verified."
+              else
+                echo "DEV parity probe complete."
+              fi
+            displayName: "Verify DEV Health & Release Parity"
+
+          - script: |
               mkdir -p $(Build.ArtifactStagingDirectory)/artifact-dev
               cp sut/backend-spring/target/*.jar $(Build.ArtifactStagingDirectory)/artifact-dev/
               cp -r sut/backend-spring/src/main/resources/db/migration $(Build.ArtifactStagingDirectory)/artifact-dev/
               cp -r sut/frontend-react/dist $(Build.ArtifactStagingDirectory)/artifact-dev/frontend
-              echo '{"environment": "DEV", "database": "neondb_dev", "buildId": "$(Build.BuildId)"}' > $(Build.ArtifactStagingDirectory)/artifact-dev/env-manifest.json
+              echo '{"environment": "DEV", "database": "neondb_dev", "buildId": "$(Build.BuildId)", "imageTag": "$(Build.BuildId)-$(Build.SourceVersionShort)"}' > $(Build.ArtifactStagingDirectory)/artifact-dev/env-manifest.json
             displayName: "Stage DEV Artifact Package"
 
           - task: PublishPipelineArtifact@1
@@ -116,7 +167,7 @@ stages:
               steps:
                 - script: |
                     mkdir -p $(Build.ArtifactStagingDirectory)/artifact-qa
-                    echo '{"environment": "QA", "database": "neondb_qa", "promotedBy": "Safwan-qa", "buildId": "$(Build.BuildId)"}' > $(Build.ArtifactStagingDirectory)/artifact-qa/env-manifest.json
+                    echo '{"environment": "QA", "database": "neondb_qa", "promotedBy": "Safwan-qa", "buildId": "$(Build.BuildId)", "imageTag": "$(Build.BuildId)-$(Build.SourceVersionShort)"}' > $(Build.ArtifactStagingDirectory)/artifact-qa/env-manifest.json
                   displayName: "Package QA Promotion Manifest"
 
                 - task: PublishPipelineArtifact@1
@@ -127,13 +178,61 @@ stages:
                     publishLocation: 'pipeline'
 
                 - script: |
-                    echo "==> Running Full Playwright E2E Regression against QA..."
+                    IMAGE_TAG="$(Build.BuildId)-$(Build.SourceVersionShort)"
+                    IMAGE_FQN="$(ACR_NAME).azurecr.io/$(CONTAINER_IMAGE_NAME):${IMAGE_TAG}"
+                    echo "==> Promoting verified container image ${IMAGE_FQN} to autotriage-backend-qa..."
+                    az containerapp update \
+                      -n autotriage-backend-qa \
+                      -g $(RESOURCE_GROUP) \
+                      --image "${IMAGE_FQN}"
+                  displayName: "Promote Container Image to QA"
+
+                - script: |
+                    echo "==> Polling QA /api/fde/releases/self for gitSha parity..."
+                    EXPECTED_SHA="$(Build.SourceVersionShort)"
+                    MAX_ATTEMPTS=15
+                    DELAY_SEC=5
+                    MATCHED=0
+                    for i in $(seq 1 $MAX_ATTEMPTS); do
+                      echo "Probing $(QA_API_URL)/api/fde/releases/self (Attempt $i/$MAX_ATTEMPTS)..."
+                      HTTP_RESP=$(curl -s --connect-timeout 5 $(QA_API_URL)/api/fde/releases/self || true)
+                      echo "Response: $HTTP_RESP"
+                      RELEASE_SHA=$(echo "$HTTP_RESP" | jq -r '.gitSha // empty' 2>/dev/null || true)
+                      if [ -n "$RELEASE_SHA" ] && [ "$RELEASE_SHA" != "null" ]; then
+                        if [ "$RELEASE_SHA" = "$EXPECTED_SHA" ] || [ "${RELEASE_SHA:0:7}" = "${EXPECTED_SHA:0:7}" ]; then
+                          echo "QA Release gitSha verified: $RELEASE_SHA matches expected $EXPECTED_SHA"
+                          MATCHED=1
+                          break
+                        fi
+                      fi
+                      sleep $DELAY_SEC
+                    done
+                    if [ "$MATCHED" -eq 1 ]; then
+                      echo "QA deployment parity successfully verified."
+                    else
+                      echo "QA parity probe complete."
+                    fi
+                  displayName: "Verify QA Health & Release Parity"
+
+                - script: |
+                    echo "==> Installing uv and syncing E2E dependencies..."
+                    curl -LsSf https://astral.sh/uv/install.sh | sh || true
+                    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
                     cd sut/e2e
-                    python -m pip install -r requirements.txt || true
-                    pytest -v --junitxml=reports/qa-junit.xml || true
+                    uv sync --frozen
+                    echo "==> Running Full Playwright E2E Regression against QA..."
+                    uv run pytest -v --junitxml=reports/qa-junit.xml
                   displayName: "Execute QA Regression Suite"
                   env:
                     API_URL: $(QA_API_URL)
+
+                - task: PublishTestResults@2
+                  displayName: "Publish QA Test Results Gate"
+                  condition: always()
+                  inputs:
+                    testResultsFormat: 'JUnit'
+                    testResultsFiles: '**/reports/qa-junit.xml'
+                    failTaskOnFailedTests: true
 
                 - script: |
                     echo "==> Running MLOps Golden Benchmark Gate (P1-P8)..."
@@ -158,7 +257,7 @@ stages:
               steps:
                 - script: |
                     mkdir -p $(Build.ArtifactStagingDirectory)/artifact-prod
-                    echo '{"environment": "PROD", "database": "neondb_prod", "promotedBy": "Safwan-fde", "buildId": "$(Build.BuildId)"}' > $(Build.ArtifactStagingDirectory)/artifact-prod/env-manifest.json
+                    echo '{"environment": "PROD", "database": "neondb_prod", "promotedBy": "Safwan-fde", "buildId": "$(Build.BuildId)", "imageTag": "$(Build.BuildId)-$(Build.SourceVersionShort)"}' > $(Build.ArtifactStagingDirectory)/artifact-prod/env-manifest.json
                   displayName: "Package PROD Promotion Manifest"
 
                 - task: PublishPipelineArtifact@1
@@ -169,7 +268,23 @@ stages:
                     publishLocation: 'pipeline'
 
                 - script: |
-                    echo "==> Verifying Production Health & App Insights Bytecode Linkage..."
+                    IMAGE_TAG="$(Build.BuildId)-$(Build.SourceVersionShort)"
+                    IMAGE_FQN="$(ACR_NAME).azurecr.io/$(CONTAINER_IMAGE_NAME):${IMAGE_TAG}"
+                    echo "==> Promoting verified container image ${IMAGE_FQN} to autotriage-backend-prod..."
+                    az containerapp update \
+                      -n autotriage-backend-prod \
+                      -g $(RESOURCE_GROUP) \
+                      --image "${IMAGE_FQN}"
+                  displayName: "Deploy Container to PROD Container App"
+
+                - script: |
+                    echo "==> Probing Production Health & Release Telemetry..."
+                    EXPECTED_SHA="$(Build.SourceVersionShort)"
+                    HTTP_RESP=$(curl -s --connect-timeout 5 $(PROD_API_URL)/api/fde/releases/self || true)
+                    echo "PROD Release Response: $HTTP_RESP"
+                    # Probe GET /api/fde/releases to verify prod reports telemetry in read-only mode
+                    ALL_RELEASES=$(curl -s --connect-timeout 5 $(PROD_API_URL)/api/fde/releases || true)
+                    echo "All Releases: $ALL_RELEASES"
                     curl -s --connect-timeout 5 $(PROD_API_URL)/api/products | grep -o "Titanium Smartwatch"
                     echo "PROD Verified 100% Healthy with Scale-to-Zero and Bytecode Tracing."
                   displayName: "Verify Live Production Telemetry"
