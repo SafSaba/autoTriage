@@ -101,12 +101,12 @@ public class OrderController {
                 ProductEntity product = productRepository.findById(pid)
                         .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Product " + pid + " not found"));
 
-                if (product.getStock() < qty) {
+                int rowsUpdated = productRepository.decrementStockIfAvailable(product.getId(), qty);
+                if (rowsUpdated == 0) {
                     throw new ApiException(HttpStatus.CONFLICT,
                             "Insufficient stock for " + product.getName() + " (available: " + product.getStock() + ")");
                 }
                 product.setStock(product.getStock() - qty);
-                productRepository.save(product);
 
                 OrderItemEntity oi = new OrderItemEntity();
                 oi.setOrder(order);
@@ -120,12 +120,12 @@ public class OrderController {
             for (CartItemEntity ci : cartItems) {
                 ProductEntity product = ci.getProduct();
                 int qty = ci.getQuantity();
-                if (product.getStock() < qty) {
+                int rowsUpdated = productRepository.decrementStockIfAvailable(product.getId(), qty);
+                if (rowsUpdated == 0) {
                     throw new ApiException(HttpStatus.CONFLICT,
                             "Insufficient stock for " + product.getName() + " (available: " + product.getStock() + ")");
                 }
                 product.setStock(product.getStock() - qty);
-                productRepository.save(product);
 
                 OrderItemEntity oi = new OrderItemEntity();
                 oi.setOrder(order);

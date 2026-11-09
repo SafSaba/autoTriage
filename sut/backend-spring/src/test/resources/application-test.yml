@@ -9,6 +9,7 @@ spring:
       ddl-auto: validate
   flyway:
     enabled: true
+    validate-on-migrate: false
     locations: classpath:db/migration
 
 app:

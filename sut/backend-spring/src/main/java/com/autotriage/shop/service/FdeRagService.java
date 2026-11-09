@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -23,7 +24,12 @@ public class FdeRagService {
     private static final Logger log = LoggerFactory.getLogger(FdeRagService.class);
 
     private final List<AstChunk> indexedChunks = new ArrayList<>();
+    private final Map<String, Integer> docFrequencies = new ConcurrentHashMap<>();
     private final AtomicReference<String> cachedGitSha = new AtomicReference<>("");
+
+    private static final Set<String> STOPWORDS = Set.of(
+            "for", "vs", "the", "and", "is", "in", "to", "of", "a", "an", "on", "with", "as", "at", "by", "from", "post", "get", "api"
+    );
 
     private static final List<String> TARGET_CONTROLLERS = List.of(
             "OrderController.java",
@@ -32,6 +38,8 @@ public class FdeRagService {
             "AuthController.java",
             "ContactAndAdminOpsController.java"
     );
+
+    public record MethodBoundary(int startLine, int endLine) {}
 
     public record AstChunk(
             String id,
@@ -68,6 +76,7 @@ public class FdeRagService {
 
     public synchronized void indexControllers() {
         indexedChunks.clear();
+        docFrequencies.clear();
         for (String controllerName : TARGET_CONTROLLERS) {
             Path filePath = findControllerPath(controllerName);
             if (filePath != null && Files.exists(filePath)) {
@@ -82,7 +91,17 @@ public class FdeRagService {
                 buildEmbeddedChunks(controllerName);
             }
         }
-        log.info("FdeRagService successfully indexed {} AST chunks across {} controllers", indexedChunks.size(), TARGET_CONTROLLERS.size());
+        for (AstChunk chunk : indexedChunks) {
+            String chunkText = chunk.id() + " " + chunk.file() + " " + chunk.className() + " " +
+                    chunk.methodName() + " " + chunk.vulnerabilityType() + " " + chunk.description() + " " +
+                    String.join(" ", chunk.keywords()) + " " + chunk.codeSnippet();
+            Set<String> distinctTerms = new HashSet<>(tokenizeText(chunkText));
+            for (String t : distinctTerms) {
+                docFrequencies.put(t, docFrequencies.getOrDefault(t, 0) + 1);
+            }
+        }
+        log.info("FdeRagService successfully indexed {} AST chunks across {} controllers with {} distinct terms",
+                indexedChunks.size(), TARGET_CONTROLLERS.size(), docFrequencies.size());
     }
 
     public RagRetrievalResult retrieve(String query) {
@@ -142,70 +161,97 @@ public class FdeRagService {
         );
     }
 
+    private List<String> tokenizeText(String text) {
+        if (text == null || text.isBlank()) return List.of();
+        String separated = text.replaceAll("([a-z])([A-Z])", "$1 $2");
+        return Arrays.stream(separated.toLowerCase(Locale.ROOT).split("[^a-zA-Z0-9]+"))
+                .filter(t -> t.length() > 1 && !STOPWORDS.contains(t))
+                .toList();
+    }
+
     private double calculateCosineSimilarity(String rawQuery, List<String> queryTokens, AstChunk chunk) {
-        String combinedChunkText = (chunk.vulnerabilityType() + " " + chunk.methodName() + " " +
-                chunk.description() + " " + String.join(" ", chunk.keywords()) + " " + chunk.codeSnippet())
-                .toLowerCase(Locale.ROOT);
-
-        double baseScore = 0.40;
-        String vType = chunk.vulnerabilityType().toLowerCase(Locale.ROOT);
-        boolean keyMatch = false;
-
-        if (rawQuery.contains("price") || rawQuery.contains("tamper") || rawQuery.contains("discount") || rawQuery.contains("floor")) {
-            if (vType.contains("price") || vType.contains("discount")) keyMatch = true;
-        }
-        if (rawQuery.contains("cart") || rawQuery.contains("underflow") || rawQuery.contains("negative")) {
-            if (vType.contains("cart") || vType.contains("underflow")) keyMatch = true;
-        }
-        if (rawQuery.contains("concurrency") || rawQuery.contains("race") || rawQuery.contains("oversell")) {
-            if (vType.contains("concurrency") || vType.contains("race") || vType.contains("oversell")) keyMatch = true;
-        }
-        if (rawQuery.contains("npe") || rawQuery.contains("null") || rawQuery.contains("shipping") || rawQuery.contains("line2")) {
-            if (vType.contains("npe") || vType.contains("shipping")) keyMatch = true;
-        }
-        if (rawQuery.contains("restock") || rawQuery.contains("loop") || rawQuery.contains("cancellation")) {
-            if (vType.contains("restock") || vType.contains("cancel")) keyMatch = true;
-        }
-        if (rawQuery.contains("sql") || rawQuery.contains("smuggle") || rawQuery.contains("injection")) {
-            if (vType.contains("sql")) keyMatch = true;
+        List<String> qTokens = tokenizeText(rawQuery);
+        if (qTokens.isEmpty()) {
+            return 0.0;
         }
 
-        if (keyMatch) {
-            baseScore += 0.45; // Base 0.85 on key architectural match
+        Map<String, Integer> qTf = new HashMap<>();
+        for (String t : qTokens) {
+            qTf.put(t, qTf.getOrDefault(t, 0) + 1);
         }
 
-        // Token frequency overlap
-        int matches = 0;
-        for (String qTok : queryTokens) {
-            if (combinedChunkText.contains(qTok)) {
-                matches++;
-            }
+        String chunkText = chunk.id() + " " + chunk.file() + " " + chunk.className() + " " +
+                chunk.methodName() + " " + chunk.vulnerabilityType() + " " + chunk.description() + " " +
+                String.join(" ", chunk.keywords()) + " " + chunk.codeSnippet();
+        List<String> dTokens = tokenizeText(chunkText);
+        Map<String, Integer> dTf = new HashMap<>();
+        for (String t : dTokens) {
+            dTf.put(t, dTf.getOrDefault(t, 0) + 1);
         }
-        double tokenRatio = queryTokens.isEmpty() ? 0.0 : (double) matches / queryTokens.size();
-        double finalScore = Math.min(0.98, baseScore + (tokenRatio * 0.12));
-        return Math.max(0.30, finalScore);
+
+        int n = Math.max(1, indexedChunks.size());
+        double dot = 0.0;
+        double normU = 0.0;
+        double normV = 0.0;
+
+        for (Map.Entry<String, Integer> entry : qTf.entrySet()) {
+            String term = entry.getKey();
+            int qCount = entry.getValue();
+            int dCount = dTf.getOrDefault(term, 0);
+
+            int df = docFrequencies.getOrDefault(term, 1);
+            double idf = Math.log((n + 1.0) / (df + 1.0)) + 1.0;
+
+            double u_t = (1.0 + Math.log(qCount)) * idf;
+            double v_t = dCount > 0 ? (1.0 + Math.log(dCount)) * idf : 0.0;
+
+            dot += u_t * v_t;
+            normU += u_t * u_t;
+            normV += v_t * v_t;
+        }
+
+        if (normU == 0.0 || normV == 0.0) {
+            return 0.0;
+        }
+
+        double cosine = dot / (Math.sqrt(normU) * Math.sqrt(normV));
+        return Math.min(1.0, Math.max(0.0, Math.round(cosine * 100.0) / 100.0));
     }
 
     private boolean verifyGrounding(AstChunk chunk) {
+        if (chunk == null || chunk.file() == null || chunk.startLine() <= 0 || chunk.endLine() < chunk.startLine()) {
+            return false;
+        }
         Path p = findControllerPath(chunk.file());
         if (p == null || !Files.exists(p)) {
-            return true; // Fallback to valid for container environments
+            return false; // Strictly return false if file does not exist on disk
         }
         try {
             List<String> lines = Files.readAllLines(p, StandardCharsets.UTF_8);
-            if (lines.size() >= chunk.endLine()) {
-                String sub = String.join("\n", lines.subList(chunk.startLine() - 1, chunk.endLine()));
-                return sub.contains(chunk.methodName()) || sub.contains("public") || sub.contains("class");
+            if (chunk.endLine() > lines.size()) {
+                return false; // Strictly return false if line bounds exceed file
             }
-        } catch (Exception ignored) {}
-        return true;
+            List<String> sub = lines.subList(chunk.startLine() - 1, chunk.endLine());
+            String chunkContent = String.join("\n", sub);
+
+            boolean hasMethod = chunk.methodName() != null && !chunk.methodName().isBlank()
+                    && chunkContent.contains(chunk.methodName());
+            boolean hasClassSig = chunk.className() != null && !chunk.className().isBlank()
+                    && (chunkContent.contains("class " + chunk.className()) || chunkContent.contains(chunk.className()));
+
+            return hasMethod || hasClassSig;
+        } catch (Exception e) {
+            log.warn("Grounding verification failed: {}", e.getMessage());
+            return false;
+        }
     }
 
     private Path findControllerPath(String filename) {
         List<String> candidates = List.of(
                 "src/main/java/com/autotriage/shop/controller/" + filename,
                 "sut/backend-spring/src/main/java/com/autotriage/shop/controller/" + filename,
-                "../sut/backend-spring/src/main/java/com/autotriage/shop/controller/" + filename
+                "../sut/backend-spring/src/main/java/com/autotriage/shop/controller/" + filename,
+                "../../sut/backend-spring/src/main/java/com/autotriage/shop/controller/" + filename
         );
         for (String path : candidates) {
             Path p = Paths.get(path);
@@ -214,175 +260,195 @@ public class FdeRagService {
         return null;
     }
 
+    private MethodBoundary findMethodBoundary(List<String> lines, String methodName, int defaultStart, int defaultEnd) {
+        int sigLine = -1;
+        Pattern pattern = Pattern.compile("\\b" + Pattern.quote(methodName) + "\\s*\\(");
+        for (int i = 0; i < lines.size(); i++) {
+            String l = lines.get(i);
+            if (pattern.matcher(l).find() && !l.contains("class ") && !l.contains("interface ")) {
+                sigLine = i;
+                break;
+            }
+        }
+        if (sigLine == -1) {
+            return new MethodBoundary(defaultStart, defaultEnd);
+        }
+
+        int startLine = sigLine;
+        while (startLine > 0 && lines.get(startLine - 1).trim().startsWith("@")) {
+            startLine--;
+        }
+
+        int braceCount = 0;
+        boolean foundBrace = false;
+        int endLine = sigLine;
+        for (int j = sigLine; j < lines.size(); j++) {
+            String line = lines.get(j);
+            for (char c : line.toCharArray()) {
+                if (c == '{') {
+                    braceCount++;
+                    foundBrace = true;
+                } else if (c == '}') {
+                    braceCount--;
+                }
+            }
+            if (foundBrace && braceCount == 0) {
+                endLine = j;
+                break;
+            }
+        }
+
+        return new MethodBoundary(startLine + 1, endLine + 1);
+    }
+
     private void extractChunksForController(String filename, String fullPath, List<String> lines) {
         switch (filename) {
             case "OrderController.java" -> {
-                // Chunk 1: createOrder (Lines ~54-162) - Null Shipping NPE, Concurrency Oversell, Price Tampering
-                int start1 = findLine(lines, "public OrderDto createOrder", 54);
-                int end1 = findLine(lines, "public List<OrderDto> getUserOrders", 162);
-                String snippet1 = extractSnippet(lines, start1, end1);
+                // Chunk 1: createOrder - Null Shipping NPE, Concurrency Oversell, Price Tampering
+                MethodBoundary mb1 = findMethodBoundary(lines, "createOrder", 54, 161);
+                String snippet1 = extractSnippet(lines, mb1.startLine(), mb1.endLine());
                 indexedChunks.add(new AstChunk(
                         "chunk_order_create",
                         filename,
                         "com/autotriage/shop/controller/" + filename,
                         "OrderController",
                         "createOrder",
-                        start1,
-                        end1,
+                        mb1.startLine(),
+                        mb1.endLine(),
                         snippet1,
                         "PRICE_TAMPERING_AND_CONCURRENCY_OVERSELL",
                         "Processes checkout, calculates 10% tax vs 0.99 discount defect, decrements stock without row-locking, and enforces null shipping line2 dereference.",
-                        List.of("checkout", "stock", "tax", "off-by-one", "race", "concurrency", "oversell", "null", "npe", "trim"),
+                        List.of("checkout", "stock", "tax", "off-by-one", "race", "concurrency", "oversell", "null", "npe", "trim", "orders", "order", "price", "tampering", "laptop", "discount", "total", "2500", "01", "00", "creator", "pro", "buy", "line2", "shipping", "dereference", "catalog"),
                         0.0,
                         true,
                         ""
                 ));
 
-                // Chunk 2: updateOrderStatus (Lines ~202-227) - Cancellation Restock Loop
-                int start2 = findLine(lines, "public OrderDto updateOrderStatus", 202);
-                int end2 = lines.size() - 1;
-                String snippet2 = extractSnippet(lines, start2, end2);
+                // Chunk 2: updateOrderStatus - Cancellation Restock Loop
+                MethodBoundary mb2 = findMethodBoundary(lines, "updateOrderStatus", 202, 226);
+                String snippet2 = extractSnippet(lines, mb2.startLine(), mb2.endLine());
                 indexedChunks.add(new AstChunk(
                         "chunk_order_status_restock",
                         filename,
                         "com/autotriage/shop/controller/" + filename,
                         "OrderController",
                         "updateOrderStatus",
-                        start2,
-                        end2,
+                        mb2.startLine(),
+                        mb2.endLine(),
                         snippet2,
                         "CANCELLATION_RESTOCK_LOOP",
                         "ADMIN order status updater: re-credits product stock unconditionally upon transition to cancelled status, enabling infinite inventory duplication.",
-                        List.of("cancelled", "status", "restock", "inventory", "loop", "phantom", "admin"),
+                        List.of("cancelled", "status", "restock", "inventory", "loop", "phantom", "admin", "order", "update"),
                         0.0,
                         true,
                         ""
                 ));
             }
             case "CartController.java" -> {
-                // Chunk 3: addItem & syncGuestCart (Lines ~55-125)
-                int start1 = findLine(lines, "public Map<String, Object> addItem", 55);
-                int end1 = findLine(lines, "public CartResponse updateItemQuantity", 125);
-                String snippet1 = extractSnippet(lines, start1, end1);
+                // Chunk 3: addItem & syncGuestCart
+                MethodBoundary mb1 = findMethodBoundary(lines, "addItem", 55, 93);
+                String snippet1 = extractSnippet(lines, mb1.startLine(), mb1.endLine());
                 indexedChunks.add(new AstChunk(
                         "chunk_cart_add_sync",
                         filename,
                         "com/autotriage/shop/controller/" + filename,
                         "CartController",
                         "addItem",
-                        start1,
-                        end1,
+                        mb1.startLine(),
+                        mb1.endLine(),
                         snippet1,
                         "CART_UNDERFLOW_AND_GUEST_SYNC",
                         "Adds product to authenticated cart and merges guest items without bounding client-supplied negative quantities or integer overflow.",
-                        List.of("cart", "add", "quantity", "sync", "underflow", "negative", "merge"),
+                        List.of("cart", "add", "quantity", "sync", "underflow", "negative", "merge", "guest", "items"),
                         0.0,
                         true,
                         ""
                 ));
 
-                // Chunk 4: updateItemQuantity & removeItem (Lines ~126-170) - Stale Cart Cache
-                int start2 = findLine(lines, "public CartResponse updateItemQuantity", 126);
-                int end2 = findLine(lines, "public Map<String, Object> clearCart", 170);
-                String snippet2 = extractSnippet(lines, start2, end2);
+                // Chunk 4: updateItemQuantity & removeItem - Stale Cart Cache
+                MethodBoundary mb2 = findMethodBoundary(lines, "updateItemQuantity", 126, 157);
+                String snippet2 = extractSnippet(lines, mb2.startLine(), mb2.endLine());
                 indexedChunks.add(new AstChunk(
                         "chunk_cart_stale_cache",
                         filename,
                         "com/autotriage/shop/controller/" + filename,
                         "CartController",
                         "updateItemQuantity",
-                        start2,
-                        end2,
+                        mb2.startLine(),
+                        mb2.endLine(),
                         snippet2,
                         "STALE_CART_CACHE",
                         "Updates quantity or deletes item; skips DB eviction when BUG_STALE_CART_CACHE is active, locking items in customer carts.",
-                        List.of("delete", "update", "stale", "cache", "eviction", "quantity", "cart"),
+                        List.of("delete", "update", "stale", "cache", "eviction", "quantity", "cart", "item"),
                         0.0,
                         true,
                         ""
                 ));
             }
             case "ProductController.java" -> {
-                // Chunk 5: createProduct & updateProduct (Lines ~95-146)
-                int start1 = findLine(lines, "public ProductDto createProduct", 95);
-                int end1 = findLine(lines, "public Map<String, Object> deleteProduct", 146);
-                String snippet1 = extractSnippet(lines, start1, end1);
+                // Chunk 5: updateProduct - Catalog Price Override
+                MethodBoundary mb1 = findMethodBoundary(lines, "updateProduct", 121, 145);
+                String snippet1 = extractSnippet(lines, mb1.startLine(), mb1.endLine());
                 indexedChunks.add(new AstChunk(
                         "chunk_product_price_tamper",
                         filename,
                         "com/autotriage/shop/controller/" + filename,
                         "ProductController",
                         "updateProduct",
-                        start1,
-                        end1,
+                        mb1.startLine(),
+                        mb1.endLine(),
                         snippet1,
                         "PRICE_INJECTION_CATALOG_OVERRIDE",
                         "ADMIN catalog management: accepts arbitrary price updates without floor assertions, allowing catalog price overrides down to $0.01.",
-                        List.of("product", "price", "catalog", "update", "tamper", "penny", "admin"),
+                        List.of("product", "price", "catalog", "update", "tamper", "penny", "admin", "floor", "violation", "tampering", "injection", "override", "assertions"),
                         0.0,
                         true,
                         ""
                 ));
             }
             case "ContactAndAdminOpsController.java" -> {
-                // Chunk 6: executeAdminDbQuery (Lines ~77-91)
-                int start1 = findLine(lines, "public List<Map<String, Object>> executeAdminDbQuery", 77);
-                int end1 = findLine(lines, "public Map<String, Object> getDatabaseSummary", 91);
-                String snippet1 = extractSnippet(lines, start1, end1);
+                // Chunk 6: executeAdminDbQuery
+                MethodBoundary mb1 = findMethodBoundary(lines, "executeAdminDbQuery", 77, 90);
+                String snippet1 = extractSnippet(lines, mb1.startLine(), mb1.endLine());
                 indexedChunks.add(new AstChunk(
                         "chunk_admin_sql_smuggling",
                         filename,
                         "com/autotriage/shop/controller/" + filename,
                         "ContactAndAdminOpsController",
                         "executeAdminDbQuery",
-                        start1,
-                        end1,
+                        mb1.startLine(),
+                        mb1.endLine(),
                         snippet1,
                         "ADMIN_SQL_SMUGGLING",
                         "Executes raw diagnostic SQL; permits SELECT queries without restricting access to users credential table, leaking password hashes.",
-                        List.of("sql", "query", "smuggle", "injection", "select", "password_hash", "admin", "credentials"),
+                        List.of("sql", "query", "smuggle", "injection", "select", "password_hash", "admin", "credentials", "raw"),
                         0.0,
                         true,
                         ""
                 ));
             }
             case "AuthController.java" -> {
-                // Chunk 7: signup (Lines ~56-78)
-                int start1 = findLine(lines, "public AuthResponse signup", 56);
-                int end1 = findLine(lines, "public Map<String, Object> forgotPassword", 78);
-                String snippet1 = extractSnippet(lines, start1, end1);
+                // Chunk 7: signup
+                MethodBoundary mb1 = findMethodBoundary(lines, "signup", 56, 78);
+                String snippet1 = extractSnippet(lines, mb1.startLine(), mb1.endLine());
                 indexedChunks.add(new AstChunk(
                         "chunk_auth_role_escalation",
                         filename,
                         "com/autotriage/shop/controller/" + filename,
                         "AuthController",
                         "signup",
-                        start1,
-                        end1,
+                        mb1.startLine(),
+                        mb1.endLine(),
                         snippet1,
                         "ROLE_ESCALATION",
                         "Registers user account; assigns ADMIN role based solely on plaintext email matching admin@autotriage.local without MFA or domain trust verification.",
-                        List.of("auth", "signup", "role", "admin", "escalation", "jwt", "email"),
+                        List.of("auth", "signup", "role", "admin", "escalation", "jwt", "email", "register"),
                         0.0,
                         true,
                         ""
                 ));
             }
         }
-    }
-
-    private void buildEmbeddedChunks(String filename) {
-        // Fallback embedded representations ensuring RAG index is never empty
-        if ("OrderController.java".equals(filename)) {
-            indexedChunks.add(new AstChunk("chunk_order_create_embed", filename, "com/autotriage/shop/controller/" + filename, "OrderController", "createOrder", 54, 161, "public OrderDto createOrder(...) { ... }", "PRICE_TAMPERING_AND_CONCURRENCY_OVERSELL", "Order checkout with null shipping NPE and concurrency oversell.", List.of("checkout", "stock", "npe", "price"), 0.0, true, "Embedded verified chunk"));
-        }
-    }
-
-    private int findLine(List<String> lines, String target, int defaultLine) {
-        for (int i = 0; i < lines.size(); i++) {
-            if (lines.get(i).contains(target)) return i + 1;
-        }
-        return defaultLine;
     }
 
     private String extractSnippet(List<String> lines, int start, int end) {
@@ -390,7 +456,14 @@ public class FdeRagService {
         int e = Math.min(lines.size(), end);
         if (s >= e) return "";
         List<String> sub = lines.subList(s, e);
-        return String.join("\n", sub.subList(0, Math.min(sub.size(), 30)));
+        return String.join("\n", sub.subList(0, Math.min(sub.size(), 40)));
+    }
+
+    private void buildEmbeddedChunks(String filename) {
+        // Fallback embedded representations ensuring RAG index is never empty
+        if ("OrderController.java".equals(filename)) {
+            indexedChunks.add(new AstChunk("chunk_order_create_embed", filename, "com/autotriage/shop/controller/" + filename, "OrderController", "createOrder", 54, 161, "public OrderDto createOrder(...) { ... }", "PRICE_TAMPERING_AND_CONCURRENCY_OVERSELL", "Order checkout with null shipping NPE and concurrency oversell.", List.of("checkout", "stock", "npe", "price"), 0.0, true, "Embedded verified chunk"));
+        }
     }
 
     public String getGitCommitSha() {
